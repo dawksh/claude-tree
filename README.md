@@ -18,14 +18,36 @@ tmux sessions
 ## Install
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/dawksh/claude-tree/main/install.sh | bash
+```
+
+Installs `ct` to `~/.local/bin`, the tmux fragment to `~/.config/claude-tree/`,
+and adds one `source-file` line to `~/.tmux.conf` (backing it up first).
+
+Overrides:
+
+```sh
+CT_VERSION=v0.1.0 …     pin a release instead of latest
+CT_PREFIX=~/bin …       install ct somewhere else
+CT_CONFDIR=~/.tmux …    put the tmux fragment somewhere else
+CT_NO_TMUX_CONF=1 …     do not touch ~/.tmux.conf
+```
+
+### From source
+
+```sh
+git clone https://github.com/dawksh/claude-tree ~/projects/claude-tree
 ln -sf ~/projects/claude-tree/bin/ct ~/.local/bin/ct
 echo 'source-file ~/projects/claude-tree/tmux/claude-tree.conf' >> ~/.tmux.conf
 tmux source-file ~/.tmux.conf      # or prefix + r
-ct doctor
 ```
 
 Needs `tmux`, `git`, `fzf`, `nvim`, `claude`, and `~/.local/bin` on `PATH`.
 `ct doctor` checks all of it.
+
+### Update
+
+Re-run the installer. `ct` is a single file; nothing else changes.
 
 ---
 

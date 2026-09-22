@@ -431,8 +431,9 @@ cmd_doctor() {
   done
   case ":$PATH:" in *":$HOME/.local/bin:"*) printf '  ok    ~/.local/bin on PATH\n';;
     *) printf '  MISS  ~/.local/bin not on PATH\n'; ok=1;; esac
-  if [ -x "$HOME/.local/bin/ct" ]; then printf '  ok    ~/.local/bin/ct\n'
-  else printf '  MISS  ~/.local/bin/ct not installed\n'; ok=1; fi
+  local self; self=$(command -v ct 2>/dev/null) || self=""
+  if [ -n "$self" ]; then printf '  ok    ct on PATH (%s)\n' "$self"
+  else printf '  MISS  ct not on PATH\n'; ok=1; fi
   if grep -q 'claude-tree.conf' "$HOME/.tmux.conf" 2>/dev/null; then printf '  ok    ~/.tmux.conf sources claude-tree.conf\n'
   else printf '  MISS  ~/.tmux.conf does not source claude-tree.conf\n'; ok=1; fi
   printf '  --    worktree root %s\n' "$CT_WORKTREE_ROOT"
