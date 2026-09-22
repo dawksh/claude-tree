@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# claude-tree: git worktree + tmux + Claude Code harness
+set -euo pipefail
+
+# tmux may launch this outside an interactive shell
+PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+
+CT_WORKTREE_ROOT="${CT_WORKTREE_ROOT:-$HOME/projects/.worktrees}"
+CT_STATE="${CT_STATE:-$HOME/.local/state/claude-tree}"
+CT_REPOS="$CT_STATE/repos"
+
+die()  { printf 'ct: %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[2m::\033[0m %s\n' "$*" >&2; }
+
+slugify() { printf '%s' "$1" | tr '/.: ' '----'; }
+
+main_worktree() {
+  git -C "${1:-.}" worktree list --porcelain 2>/dev/null |
+    awk 'NR==1 && /^worktree /{print substr($0,10)}'
+}
+
+require_repo() {
+  local m
+  m=$(main_worktree "${1:-.}") || true
+  [ -n "$m" ] || die "not inside a git repository"
+  printf '%s' "$m"
+}
+
+register_repo() {
+  mkdir -p "$CT_STATE"
+  grep -qxF "$1" "$CT_REPOS" 2>/dev/null || printf '%s\n' "$1" >> "$CT_REPOS"
+}
+
+tree_dir()  { printf '%s/%s/%s' "$CT_WORKTREE_ROOT" "$1" "$2"; }
+sess_name() { printf '%s/%s' "$1" "$2"; }
+
+# stable small integer per tree, for port derivation
+tree_index() {
+  local repo=$1 slug=$2 f="$CT_STATE/idx/$1/$2" n
+  if [ -f "$f" ]; then cat "$f"; return; fi
+  mkdir -p "$CT_STATE/idx/$repo"
+  n=$(cat "$CT_STATE/idx/$repo"/* 2>/dev/null | sort -n | tail -1)
+  n=$(( ${n:-0} + 1 ))
+  printf '%s\n' "$n" | tee "$f"
+}
+
+# ---------------------------------------------------------------- bootstrap
+
+bootstrap() {
+  local main=$1 dir=$2 repo=$3 branch=$4 idx=$5
+  local -a CT_LINK_DIRS=(node_modules)
+  local -a CT_COPY_GLOBS=('.env*')
+  local -a CT_LOCKFILES=(package-lock.json yarn.lock pnpm-lock.yaml bun.lockb)
+  local CT_INSTALL_CMD='npm ci'
+  local CT_POST_CREATE=''
+
+  # shellcheck disable=SC1091
+  [ -f "$main/.claude-tree" ] && . "$main/.claude-tree"
+
+  local locks_match=1 needs_install=0 l d g f
+  for l in "${CT_LOCKFILES[@]}"; do
+    [ -f "$main/$l" ] || continue
+    cmp -s "$main/$l" "$dir/$l" || locks_match=0
+  done
+
+  for d in "${CT_LINK_DIRS[@]}"; do
+    [ -d "$main/$d" ] || continue
+    [ -e "$dir/$d" ] && continue
+    if [ "$locks_match" = 1 ]; then
+      ln -s "$main/$d" "$dir/$d"
+      info "linked $d -> main checkout"
+    else
+      needs_install=1
+    fi
+  done
+
+  if [ "$needs_install" = 1 ] && [ -n "$CT_INSTALL_CMD" ]; then
+    info "lockfile differs from main, running: $CT_INSTALL_CMD"
+    ( cd "$dir" && eval "$CT_INSTALL_CMD" )
+  fi
+
+  for g in "${CT_COPY_GLOBS[@]}"; do
+    for f in "$main"/$g; do
+      [ -e "$f" ] || continue
+      cp -R "$f" "$dir/"
+      info "copied $(basename "$f")"
+    done
+  done
+
+  if [ -n "$CT_POST_CREATE" ]; then
+    info "post-create hook"
+    ( cd "$dir"
+      export CT_TREE_DIR="$dir" CT_TREE_BRANCH="$branch" CT_TREE_INDEX="$idx"
+      eval "$CT_POST_CREATE" )
+  fi
+}
+
+# ------------------------------------------------------------------- tmux
+
+ct_self() { command -v ct 2>/dev/null || printf '%s' "$HOME/.local/bin/ct"; }
+
+build_session() {
+  local sess=$1 dir=$2 self
+  tmux has-session -t "=$sess" 2>/dev/null && return 0
+  self=$(ct_self)
+  tmux new-session -d -s "$sess" -c "$dir" -n claude "$self _run _claude"
+  tmux new-window  -d -t "=$sess" -c "$dir" -n vim   "$self _run nvim"
+  tmux new-window  -d -t "=$sess" -c "$dir" -n shell
+  tmux select-window -t "=$sess:claude"
+}
+
+attach() {
+  local sess=$1
+  if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sess"
+  else tmux attach-session -t "=$sess"; fi
+}
+
+# repo<TAB>branch<TAB>dir  for every worktree of every known repo
+list_trees() {
+  local r
+  [ -f "$CT_REPOS" ] || return 0
+  while read -r r; do
+    [ -d "$r" ] || continue
+    git -C "$r" worktree list --porcelain 2>/dev/null | awk -v repo="$(basename "$r")" '
+      /^worktree /{p=substr($0,10)}
+      /^branch /{b=$2; sub("refs/heads/","",b); print repo"\t"b"\t"p}
+      /^detached$/{print repo"\t(detached)\t"p}'
+  done < "$CT_REPOS"
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_new() {
+  local branch="" base="" bare=0 repo_arg=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --from) base=$2; shift 2;;
+      --repo) repo_arg=$2; shift 2;;
+      --bare) bare=1; shift;;
+      -*) die "unknown flag: $1";;
+      *) branch=$1; shift;;
+    esac
+  done
+  [ -n "$branch" ] || die "usage: ct new <branch> [--from <base>] [--bare]"
+
+  local main repo slug dir sess idx
+  main=$(require_repo "${repo_arg:-.}")
+  repo=$(basename "$main")
+  slug=$(slugify "$branch")
+  dir=$(tree_dir "$repo" "$slug")
+  sess=$(sess_name "$repo" "$slug")
+  register_repo "$main"
+
+  if [ -d "$dir" ]; then
+    info "worktree already exists: $dir"
+  else
+    mkdir -p "$(dirname "$dir")"
+    if git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
+      git -C "$main" worktree add "$dir" "$branch"
+    else
+      git -C "$main" worktree add -b "$branch" "$dir" ${base:+"$base"}
+    fi
+  fi
+
+  idx=$(tree_index "$repo" "$slug")
+  if [ "$bare" = 0 ]; then
+    bootstrap "$main" "$dir" "$repo" "$branch" "$idx"
+    build_session "$sess" "$dir"
+    attach "$sess"
+  else
+    info "bare: skipped deps, env and claude"
+    printf '%s\n' "$dir"
+  fi
+}
+
+cmd_go() {
+  local picker=0 query=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --picker) picker=1; shift;;
+      *) query=$1; shift;;
+    esac
+  done
+
+  local rows sel dir sess
+  rows=$(list_trees | while IFS=$'\t' read -r repo branch path; do
+    local s live
+    s=$(sess_name "$repo" "$(slugify "$branch")")
+    if tmux has-session -t "=$s" 2>/dev/null; then live='●'; else live='·'; fi
+    printf '%s %s\t%s\t%s\n' "$live" "$s" "$path" "$s"
+  done)
+
+  [ -n "$rows" ] || die "no worktrees known yet — run 'ct new <branch>' inside a repo"
+
+  if [ -n "$query" ]; then
+    sel=$(printf '%s\n' "$rows" | grep -i -- "$query" | head -1) || true
+    [ -n "$sel" ] || die "no tree matching: $query"
+  else
+    sel=$(printf '%s\n+ new branch…\t\t\n' "$rows" |
+      fzf --delimiter=$'\t' --with-nth=1 --height=100% --reverse \
+          --prompt='tree> ' --preview-window=hidden) || return 0
+  fi
+
+  case $sel in
+    '+ new branch'*)
+      local b r
+      printf 'branch: ' >&2; read -r b
+      [ -n "$b" ] || return 0
+      r=$(sort -u "$CT_REPOS")
+      if [ "$(printf '%s\n' "$r" | wc -l)" -gt 1 ]; then
+        r=$(printf '%s\n' "$r" | fzf --prompt='repo> ' --height=100% --reverse) || return 0
+      fi
+      cmd_new "$b" --repo "$r"
+      return;;
+  esac
+
+  dir=$(printf '%s' "$sel" | cut -f2)
+  sess=$(printf '%s' "$sel" | cut -f3)
+  build_session "$sess" "$dir"
+  attach "$sess"
+}
+
+cmd_ls() {
+  local repo branch path s live dirty
+  printf '%-3s %-28s %-8s %s\n' '' 'TREE' 'STATE' 'PATH'
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    s=$(sess_name "$repo" "$(slugify "$branch")")
+    if tmux has-session -t "=$s" 2>/dev/null; then live='live'; else live='-'; fi
+    if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then dirty='*'; else dirty=' '; fi
+    printf '%-3s %-28s %-8s %s\n' "$dirty" "$s" "$live" "$path"
+  done
+}
+
+cmd_rm() {
+  local branch="" force=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --force|-f) force=1; shift;;
+      *) branch=$1; shift;;
+    esac
+  done
+  [ -n "$branch" ] || die "usage: ct rm <branch> [--force]"
+
+  local main repo slug dir sess dirty unpushed
+  main=$(require_repo .)
+  repo=$(basename "$main")
+  slug=$(slugify "$branch")
+  dir=$(tree_dir "$repo" "$slug")
+  sess=$(sess_name "$repo" "$slug")
+  [ -d "$dir" ] || die "no worktree for $branch at $dir"
+
+  dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
+  if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    unpushed=$(git -C "$dir" log --oneline '@{u}..' 2>/dev/null || true)
+  elif [ -n "$(git -C "$dir" remote)" ]; then
+    unpushed=$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null || true)
+  else
+    unpushed=''   # no remote configured, nothing can be "unpushed"
+  fi
+
+  if [ "$force" = 0 ] && [ -n "$dirty$unpushed" ]; then
+    [ -n "$dirty" ]    && { printf 'uncommitted changes:\n%s\n' "$dirty" >&2; }
+    [ -n "$unpushed" ] && { printf 'unpushed commits:\n%s\n' "$unpushed" >&2; }
+    die "refusing to remove $branch — commit/push, or pass --force"
+  fi
+
+  printf 'will remove:\n  session  %s\n  worktree %s\n  branch   %s (only if merged)\n' "$sess" "$dir" "$branch" >&2
+  printf 'proceed? [y/N] ' >&2; read -r ans
+  case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
+
+  tmux kill-session -t "=$sess" 2>/dev/null || true
+  if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
+  else git -C "$main" worktree remove "$dir"; fi
+  git -C "$main" branch -d "$branch" 2>/dev/null || info "branch $branch kept (not merged)"
+  rm -f "$CT_STATE/idx/$repo/$slug" "$CT_STATE/seen/$repo/$slug"
+  info "removed $sess"
+}
+
+cmd_toggle() {
+  local pane cur sess target dir self
+  pane=${TMUX_PANE:-}
+  if [ -n "$pane" ]; then
+    cur=$(tmux display-message -p -t "$pane" '#W')
+    sess=$(tmux display-message -p -t "$pane" '#S')
+  else
+    cur=$(tmux display-message -p '#W'); sess=$(tmux display-message -p '#S')
+  fi
+  if [ "$cur" = claude ]; then target=vim; else target=claude; fi
+  tmux select-window -t "=$sess:$target" 2>/dev/null && return 0
+  dir=$(tmux display-message -p -t "${pane:-$sess}" '#{pane_current_path}')
+  self=$(ct_self)
+  if [ "$target" = vim ]; then
+    tmux new-window -t "=$sess" -c "$dir" -n vim "$self _run nvim"
+  else
+    tmux new-window -t "=$sess" -c "$dir" -n claude "$self _run _claude"
+  fi
+}
+
+# window entrypoint: run the program, then drop to a shell in the same tree
+cmd_run() {
+  case ${1:-} in
+    _claude) cmd_claude || true;;
+    *) "$@" || true;;
+  esac
+  exec "${SHELL:-/bin/zsh}" -i
+}
+
+# launcher used by the claude window; resumes this tree's own conversation
+cmd_claude() {
+  local repo slug marker
+  repo=$(basename "$(main_worktree .)")
+  slug=$(slugify "$(git branch --show-current 2>/dev/null || echo detached)")
+  marker="$CT_STATE/seen/$repo/$slug"
+  mkdir -p "$(dirname "$marker")"
+  if [ -f "$marker" ]; then
+    claude --continue || claude
+  else
+    : > "$marker"
+    claude
+  fi
+}
+
+cmd_doctor() {
+  local ok=0 b
+  for b in tmux git fzf nvim claude; do
+    if command -v "$b" >/dev/null 2>&1; then printf '  ok    %s\n' "$b"
+    else printf '  MISS  %s\n' "$b"; ok=1; fi
+  done
+  case ":$PATH:" in *":$HOME/.local/bin:"*) printf '  ok    ~/.local/bin on PATH\n';;
+    *) printf '  MISS  ~/.local/bin not on PATH\n'; ok=1;; esac
+  if [ -x "$HOME/.local/bin/ct" ]; then printf '  ok    ~/.local/bin/ct\n'
+  else printf '  MISS  ~/.local/bin/ct not installed\n'; ok=1; fi
+  if grep -q 'claude-tree.conf' "$HOME/.tmux.conf" 2>/dev/null; then printf '  ok    ~/.tmux.conf sources claude-tree.conf\n'
+  else printf '  MISS  ~/.tmux.conf does not source claude-tree.conf\n'; ok=1; fi
+  printf '  --    worktree root %s\n' "$CT_WORKTREE_ROOT"
+  printf '  --    repos known   %s\n' "$( [ -f "$CT_REPOS" ] && wc -l < "$CT_REPOS" | tr -d ' ' || echo 0)"
+  return $ok
+}
+
+usage() {
+  cat <<'USAGE'
+ct — worktree + tmux + Claude Code harness
+
+  ct new <branch> [--from <base>] [--bare]   create worktree, bootstrap, open session
+  ct go [query]                              pick a tree (fzf) and switch to it
+  ct ls                                      list worktrees, session state, dirtiness
+  ct rm <branch> [--force]                   kill session, remove worktree, prune branch
+  ct doctor                                  check the install
+
+keys (inside tmux)
+  M-w   tree picker          M-e   toggle claude <-> vim
+  M-1   claude   M-2 vim   M-3 shell
+USAGE
+}
+
+case ${1:-} in
+  new)    shift; cmd_new "$@";;
+  go)     shift; cmd_go "$@";;
+  ls)     shift; cmd_ls "$@";;
+  rm)     shift; cmd_rm "$@";;
+  toggle) shift; cmd_toggle "$@";;
+  doctor) shift; cmd_doctor "$@";;
+  _run)    shift; cmd_run "$@";;
+  _claude) shift; cmd_claude "$@";;
+  ''|-h|--help|help) usage;;
+  *) die "unknown command: $1 (try: ct help)";;
+esac
