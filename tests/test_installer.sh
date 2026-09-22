@@ -75,7 +75,7 @@ grep -qx 'ST_WINDOWS="agent shell"' "$ST_CONFDIR/config" || {
   printf 'FAIL: installer did not update the window layout\n' >&2
   exit 1
 }
-if grep -Eq '^  . nvim ' <<<"$output"; then
+if grep -Eq '^[[:space:]]+.[[:space:]]+nvim[[:space:]]' <<<"$output"; then
   printf 'FAIL: installer checked nvim for a layout without vim\n' >&2
   exit 1
 fi

@@ -44,33 +44,44 @@ BASE="$RELEASE_ROOT/releases/download/$VERSION"
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   B=$(printf '\033[1m'); D=$(printf '\033[2m'); R=$(printf '\033[0m')
   GRN=$(printf '\033[32m'); RED=$(printf '\033[31m'); YLW=$(printf '\033[33m')
+  CYN=$(printf '\033[36m')
 else
-  B=""; D=""; R=""; GRN=""; RED=""; YLW=""
+  B=""; D=""; R=""; GRN=""; RED=""; YLW=""; CYN=""
 fi
 
-WIDTH=52
+WIDTH=56
 # progress lines overwrite themselves on a terminal, stack up in a pipe or log
 if [ -t 1 ]; then CLEAR='\033[2K\r'; else CLEAR='\n'; fi
-rule() { printf '%s' "$D"; printf '─%.0s' $(seq 1 $WIDTH); printf '%s\n' "$R"; }
-title() {
-  printf '\n  %ssupertree%s %sinstaller%s\n' "$B" "$R" "$D" "$R"
-  printf '  %sworktree + tmux + coding-agent harness%s\n\n' "$D" "$R"
+rule() {
+  local i=0
+  printf '  %s' "$D"
+  while [ "$i" -lt "$WIDTH" ]; do printf '─'; i=$((i + 1)); done
+  printf '%s\n' "$R"
 }
-step() { printf '\n  %s%s%s\n\n' "$B" "$1" "$R"; }
-ok()   { printf '  %s✔%s %s\n' "$GRN" "$R" "$1"; }
-bad()  { printf '  %s✘%s %s\n' "$RED" "$R" "$1"; }
-warn() { printf '  %s!%s %s\n' "$YLW" "$R" "$1"; }
-die()  { printf '\n  %s✘ %s%s\n\n' "$RED" "$1" "$R" >&2; exit 1; }
+title() {
+  printf '\n  %s◆%s  %sSUPERTREE%s  %sinstaller %s%s\n' "$CYN" "$R" "$B" "$R" "$D" "$VERSION" "$R"
+  printf '     %sworktrees × tmux × coding agents%s\n' "$D" "$R"
+  rule
+}
+step() { # number, title, description
+  printf '\n  %s%s%s  %s%s%s\n' "$CYN" "$1" "$R" "$B" "$2" "$R"
+  [ -z "${3:-}" ] || printf '      %s%s%s\n' "$D" "$3" "$R"
+  printf '\n'
+}
+ok()   { printf '      %s✔%s  %s\n' "$GRN" "$R" "$1"; }
+bad()  { printf '      %s✘%s  %s\n' "$RED" "$R" "$1"; }
+warn() { printf '      %s!%s  %s\n' "$YLW" "$R" "$1"; }
+die()  { printf '\n      %s✘ %s%s\n\n' "$RED" "$1" "$R" >&2; exit 1; }
 
 row() { # name, status glyph+color, detail
-  printf '  %s %-9s %s%s%s\n' "$2" "$1" "$D" "$3" "$R"
+  printf '      %s  %-10s %s%s%s\n' "$2" "$1" "$D" "$3" "$R"
 }
 
 ask() { # question -> 0 yes, 1 no
   [ "${ST_YES:-0}" = 1 ] && return 0
   [ -r /dev/tty ] || { warn "no terminal to ask on; skipping"; return 1; }
   local a
-  printf '\n  %s %s[Y/n]%s ' "$1" "$D" "$R"
+  printf '\n      %s %s[Y/n]%s ' "$1" "$D" "$R"
   # a failed read means no one is there to answer — never take that as consent
   if ! { read -r a < /dev/tty; } 2>/dev/null; then
     printf '\n'; warn "no terminal to ask on; skipping"; return 1
@@ -119,10 +130,10 @@ select_harness() {
     fi
   fi
   if [ -r /dev/tty ] && [ "${ST_YES:-0}" != 1 ]; then
-    printf '  1  Claude Code %s(default)%s\n' "$D" "$R"
-    printf '  2  Codex\n'
-    printf '  3  OpenRouter %s(via OpenCode)%s\n' "$D" "$R"
-    printf '\n  choose harness %s[1]%s ' "$D" "$R"
+    printf '      1  Claude Code %s(default)%s\n' "$D" "$R"
+    printf '      2  Codex\n'
+    printf '      3  OpenRouter %s(via OpenCode)%s\n' "$D" "$R"
+    printf '\n      choose harness %s[1]%s ' "$D" "$R"
     read -r choice < /dev/tty || choice=""
   fi
   case ${choice:-1} in
@@ -280,17 +291,16 @@ tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT
 LOG="$tmpdir/install.log"
 
 title
-rule
-step "agent harness"
+step "01" "Workspace" "Choose what every new tree opens."
 select_harness
 select_windows
 row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS")"
-row "windows" "${GRN}✔${R}" "$WINDOWS"
+row "windows" "${GRN}✔${R}" "${WINDOWS// / · }"
 harness_cmd=$(harness_bin "$HARNESS")
 windows_include vim && DEPS="$DEPS nvim"
 windows_include agent && [ -n "$harness_cmd" ] && DEPS="$DEPS $harness_cmd"
 
-step "dependencies"
+step "02" "Dependencies" "Checking the tools this workspace needs."
 
 missing=""
 for d in $DEPS; do
@@ -313,7 +323,7 @@ if [ -n "$missing" ]; then
   elif ask "install $n missing package(s) with $B$pm$R?"; then
     printf '\n'
     for d in $missing; do
-      printf '  %s…%s installing %-8s' "$D" "$R" "$d"
+      printf '      %s…%s installing %-8s' "$D" "$R" "$d"
       if install_one "$d" "$pm" "$LOG"; then printf "$CLEAR"; ok "installed $d"
       else printf "$CLEAR"; bad "failed $d — see log below"; fi
     done
@@ -333,7 +343,7 @@ fi
 
 # ------------------------------------------------------------- supertree
 
-step "supertree $VERSION"
+step "03" "Install" "Putting supertree in the right places."
 
 curl -fsSL "$BASE/st"            -o "$tmpdir/st"            || die "could not download st from $BASE"
 curl -fsSL "$BASE/supertree.conf" -o "$tmpdir/supertree.conf" || die "could not download supertree.conf from $BASE"
@@ -346,14 +356,14 @@ mv "$tmpdir/stamped" "$tmpdir/st"
 
 mkdir -p "$PREFIX" "$CONFDIR"
 install -m 0755 "$tmpdir/st" "$PREFIX/st"
-ok "st           $PREFIX/st"
+row "command" "${GRN}✔${R}" "$PREFIX/st"
 
 sed "s|~/.local/bin/st|$PREFIX/st|g" "$tmpdir/supertree.conf" > "$CONFDIR/supertree.conf"
-ok "bindings     $CONFDIR/supertree.conf"
+row "bindings" "${GRN}✔${R}" "$CONFDIR/supertree.conf"
 
 write_config
-ok "harness      $(harness_label "$HARNESS") ($CONFIG)"
-ok "windows      $WINDOWS"
+row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS") · $CONFIG"
+row "windows" "${GRN}✔${R}" "${WINDOWS// / · }"
 
 if [ "${ST_NO_TMUX_CONF:-0}" != 1 ]; then
   if [ -f "$TMUX_CONF" ] && grep -q 'supertree.conf' "$TMUX_CONF"; then
@@ -371,15 +381,16 @@ fi
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
   *) printf '\n'; warn "$PREFIX is not on your PATH"
-     printf '    %sexport PATH="%s:$PATH"%s\n' "$D" "$PREFIX" "$R";;
+     printf '         %sexport PATH="%s:$PATH"%s\n' "$D" "$PREFIX" "$R";;
 esac
 
-step "next"
-printf '  %sst doctor%s          verify the install\n' "$B" "$R"
-printf '  %sst new <branch>%s    from inside any git repo\n' "$B" "$R"
+rule
+step "04" "Ready" "supertree $VERSION is installed."
+printf '      %sst doctor%s          verify the install\n' "$B" "$R"
+printf '      %sst new <branch>%s    start from any git repo\n' "$B" "$R"
 if [ "$HARNESS" = openrouter ]; then
-  printf '  %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
+  printf '      %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
 fi
-printf '  %sM-w%s picker   %sM-e%s toggle windows   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
+printf '\n      %sM-w%s picker   %sM-e%s toggle   %sM-q%s close\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
 rule
 printf '\n'
