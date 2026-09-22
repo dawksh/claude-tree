@@ -35,6 +35,25 @@ info() { printf '\033[2m::\033[0m %s\n' "$*" >&2; }
 
 slugify() { printf '%s' "$1" | tr '/.: ' '----'; }
 
+# Keep names readable while making branches and same-named repositories distinct.
+sha256_stream() {
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256
+  elif command -v sha256sum >/dev/null 2>&1; then sha256sum
+  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256
+  else die "a SHA-256 tool (shasum, sha256sum, or openssl) is required"
+  fi | sed 's/^.*= //; s/ .*//'
+}
+identity_hash() { printf '%s' "$1" | sha256_stream | cut -c1-32; }
+config_fingerprint() { sha256_stream < "$1"; }
+key_part() {
+  local label identity=${2:-$1}
+  label=$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_-' '-' | cut -c1-48)
+  [ -n "$label" ] || label=item
+  printf '%s-%s' "$label" "$(identity_hash "$identity")"
+}
+repo_key() { key_part "$(basename "$1")" "$1"; }
+branch_key() { key_part "$1"; }
+
 harness_window() {
   case $ST_HARNESS in
     claude|codex|openrouter) printf '%s' "$ST_HARNESS";;
@@ -120,13 +139,63 @@ register_repo() {
 
 tree_dir()  { printf '%s/%s/%s' "$ST_WORKTREE_ROOT" "$1" "$2"; }
 sess_name() { printf '%s/%s' "$1" "$2"; }
+tree_label() { printf '%s/%s' "${1%-*}" "$2"; }
+
+session_for_label() {
+  local wanted=$1 repo branch path
+  while IFS=$'\t' read -r repo branch path; do
+    if [ "$(tree_label "$repo" "$branch")" = "$wanted" ]; then
+      sess_name "$repo" "$(branch_key "$branch")"
+      return 0
+    fi
+  done < <(list_trees)
+  return 1
+}
+
+# Git is the source of truth when reusing or removing a worktree. This also
+# recognizes trees created by older releases, whose directory names can collide.
+branch_worktree() {
+  local main=$1 branch=$2 line path=''
+  while IFS= read -r line; do
+    case $line in
+      'worktree '*) path=${line#worktree };;
+      'branch '*)
+        if [ "${line#branch }" = "refs/heads/$branch" ]; then
+          printf '%s' "$path"
+          return 0
+        fi;;
+    esac
+  done < <(git -C "$main" worktree list --porcelain)
+  return 1
+}
+
+managed_tree() {
+  local main=$1 branch=$2 path=$3 repo slug
+  repo=$(repo_key "$main")
+  slug=$(branch_key "$branch")
+  [ "$path" -ef "$(tree_dir "$repo" "$slug")" ] && return 0
+  [ "$path" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ]
+}
+
+trusted_config_snapshot=''
+prepare_repo_config() {
+  local main=$1 expected actual
+  [ -f "$main/.supertree" ] || return 0
+  trusted_config_snapshot=$(mktemp)
+  trap 'rm -f "${trusted_config_snapshot:-}"' EXIT
+  cp "$main/.supertree" "$trusted_config_snapshot"
+  actual=$(config_fingerprint "$trusted_config_snapshot")
+  expected=$(cat "$ST_STATE/trust/$(repo_key "$main")" 2>/dev/null || true)
+  [ "$actual" = "$expected" ] ||
+    die "untrusted or changed $main/.supertree; review it, then run 'st trust' in that repository"
+}
 
 # stable small integer per tree, for port derivation
 tree_index() {
-  local repo=$1 slug=$2 f="$ST_STATE/idx/$1/$2" n
+  local repo=$1 slug=$2 old_repo=$3 f="$ST_STATE/idx/$1/$2" n
   if [ -f "$f" ]; then cat "$f"; return; fi
   mkdir -p "$ST_STATE/idx/$repo"
-  n=$(cat "$ST_STATE/idx/$repo"/* 2>/dev/null | sort -n | tail -1)
+  n=$(cat "$ST_STATE/idx/$repo"/* "$ST_STATE/idx/$old_repo"/* 2>/dev/null | sort -n | tail -1)
   n=$(( ${n:-0} + 1 ))
   printf '%s\n' "$n" | tee "$f"
 }
@@ -142,7 +211,7 @@ bootstrap() {
   local ST_POST_CREATE=''
 
   # shellcheck disable=SC1091
-  [ -f "$main/.supertree" ] && . "$main/.supertree"
+  [ -n "$trusted_config_snapshot" ] && . "$trusted_config_snapshot"
 
   local locks_match=1 needs_install=0 l d g f
   for l in "${ST_LOCKFILES[@]}"; do
@@ -206,7 +275,7 @@ create_window() {
 }
 
 build_session() {
-  local sess=$1 dir=$2 windows type first_name='' initial=1
+  local sess=$1 dir=$2 windows type first_name='' initial=1 branch label
   tmux has-session -t "=$sess" 2>/dev/null && return 0
   windows=$(configured_windows)
   while read -r type; do
@@ -220,6 +289,9 @@ build_session() {
   done <<EOF
 $windows
 EOF
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+  label="$(basename "$(main_worktree "$dir")")/${branch:-(detached)}"
+  tmux set-option -t "$sess" @supertree_label "$label"
   tmux select-window -t "=$sess:$first_name"
 }
 
@@ -289,13 +361,14 @@ attach() {
   fi
 }
 
-# repo<TAB>branch<TAB>dir  for every worktree of every known repo
+# repo-key<TAB>branch<TAB>dir  for every worktree of every known repo
 list_trees() {
-  local r
+  local r repo
   [ -f "$ST_REPOS" ] || return 0
   while read -r r; do
     [ -d "$r" ] || continue
-    git -C "$r" worktree list --porcelain 2>/dev/null | awk -v repo="$(basename "$r")" '
+    repo=$(repo_key "$r")
+    git -C "$r" worktree list --porcelain 2>/dev/null | awk -v repo="$repo" '
       /^worktree /{p=substr($0,10)}
       /^branch /{b=$2; sub("refs/heads/","",b); print repo"\t"b"\t"p}
       /^detached$/{print repo"\t(detached)\t"p}'
@@ -353,7 +426,10 @@ picker_rows() {
   bin=$(harness_bin)
   bin=${bin##*/}
 
-  list_trees | awk -F '\t' -v default_name="$name" -v bin="$bin" '
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    printf '%s\t%s\t%s\t%s\n' "$repo" "$branch" "$path" \
+      "$(sess_name "$repo" "$(branch_key "$branch")")"
+  done | awk -F '\t' -v default_name="$name" -v bin="$bin" '
     FILENAME == ARGV[1] {
       s = $1
       if (s == "") next
@@ -368,9 +444,10 @@ picker_rows() {
       next
     }
     {
-      slug = $2
-      gsub(/[\/:. ]/, "-", slug)
-      s = $1 "/" slug
+      s = $4
+      repo_label = $1
+      sub(/-[^-]*$/, "", repo_label)
+      label = repo_label "/" $2
       if (!(s in live)) { glyph = "·"; status = "closed" }
       else {
         glyph = "●"
@@ -380,7 +457,7 @@ picker_rows() {
              agent_command[s] == "node" || agent_command[s] == "bun"))))
           status = "running"
       }
-      printf "%s %-28s %-7s\t%s\t%s\t%s\n", glyph, s, status, $3, s, agent_pane[s]
+      printf "%s %-28s %-7s\t%s\t%s\t%s\n", glyph, label, status, $3, s, agent_pane[s]
     }
   ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r label path sess pane; do
     if [ -n "$pane" ] && [ "${label%running}" != "$label" ] && agent_needs_input "$pane"; then
@@ -405,17 +482,23 @@ cmd_new() {
   done
   [ -n "$branch" ] || die "usage: st new <branch> [--from <base>] [--bare]"
 
-  local main repo slug dir sess idx
+  local main repo slug dir sess idx existing
   main=$(require_repo "${repo_arg:-.}")
-  repo=$(basename "$main")
-  slug=$(slugify "$branch")
+  repo=$(repo_key "$main")
+  slug=$(branch_key "$branch")
   dir=$(tree_dir "$repo" "$slug")
   sess=$(sess_name "$repo" "$slug")
+  [ "$bare" = 1 ] || prepare_repo_config "$main"
   register_repo "$main"
 
-  if [ -d "$dir" ]; then
+  existing=$(branch_worktree "$main" "$branch" || true)
+  if [ -n "$existing" ]; then
+    managed_tree "$main" "$branch" "$existing" ||
+      die "$branch is already checked out outside supertree: $existing"
+    dir=$existing
     info "worktree already exists: $dir"
   else
+    [ ! -e "$dir" ] && [ ! -L "$dir" ] || die "path already exists: $dir"
     mkdir -p "$(dirname "$dir")"
     if git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
       git -C "$main" worktree add "$dir" "$branch"
@@ -424,7 +507,13 @@ cmd_new() {
     fi
   fi
 
-  idx=$(tree_index "$repo" "$slug")
+  if [ "$dir" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ] &&
+     [ -f "$ST_STATE/idx/$(basename "$main")/$(slugify "$branch")" ] &&
+     [ ! -f "$ST_STATE/idx/$repo/$slug" ]; then
+    mkdir -p "$ST_STATE/idx/$repo"
+    cp "$ST_STATE/idx/$(basename "$main")/$(slugify "$branch")" "$ST_STATE/idx/$repo/$slug"
+  fi
+  idx=$(tree_index "$repo" "$slug" "$(basename "$main")")
   if [ "$bare" = 0 ]; then
     bootstrap "$main" "$dir" "$repo" "$branch" "$idx"
     build_session "$sess" "$dir"
@@ -433,6 +522,18 @@ cmd_new() {
     info "bare: skipped deps, env and agent"
     printf '%s\n' "$dir"
   fi
+}
+
+cmd_trust() {
+  [ $# -eq 0 ] || die "usage: st trust"
+  local main fingerprint file
+  main=$(require_repo .)
+  file="$main/.supertree"
+  [ -f "$file" ] || die "no .supertree in $main"
+  fingerprint=$(config_fingerprint "$file")
+  mkdir -p "$ST_STATE/trust"
+  ( umask 077; printf '%s\n' "$fingerprint" > "$ST_STATE/trust/$(repo_key "$main")" )
+  info "trusted $file ($fingerprint); changes will require trusting it again"
 }
 
 cmd_go() {
@@ -507,7 +608,7 @@ cmd_ls() {
   local repo branch path s live dirty agent
   printf '%-3s %-28s %-8s %-8s %s\n' '' 'TREE' 'SESSION' 'AGENT' 'PATH'
   list_trees | while IFS=$'\t' read -r repo branch path; do
-    s=$(sess_name "$repo" "$(slugify "$branch")")
+    s=$(sess_name "$repo" "$(branch_key "$branch")")
     if tmux has-session -t "=$s" 2>/dev/null; then live='live'; else live='-'; fi
     agent=$(agent_status "$s")
     if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then dirty='*'; else dirty=' '; fi
@@ -520,10 +621,13 @@ cmd_status() {
   if [ $# -gt 0 ]; then
     query=$1
     all=$(known_sessions)
-    case $'\n'"$all"$'\n' in
-      *$'\n'"$query"$'\n'*) s=$query;;
-      *) s=$(printf '%s\n' "$all" | grep -i -- "$query" | head -1) || true;;
-    esac
+    s=$(session_for_label "$query" || true)
+    if [ -z "$s" ]; then
+      case $'\n'"$all"$'\n' in
+        *$'\n'"$query"$'\n'*) s=$query;;
+        *) s=$(printf '%s\n' "$all" | grep -i -- "$query" | head -1) || true;;
+      esac
+    fi
     [ -n "$s" ] || die "no tree matching: $query"
   elif [ -n "${TMUX:-}" ]; then
     s=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S')
@@ -549,14 +653,20 @@ cmd_rm() {
   done
   [ -n "$branch" ] || die "usage: st rm <branch> [--force]"
 
-  local main repo slug dir sess dirty unpushed
+  local main repo slug dir sess dirty unpushed current old_sess
   main=$(require_repo "${repo_arg:-.}")
-  repo=$(basename "$main")
-  slug=$(slugify "$branch")
-  dir=$(tree_dir "$repo" "$slug")
+  repo=$(repo_key "$main")
+  slug=$(branch_key "$branch")
+  dir=$(branch_worktree "$main" "$branch" || true)
+  [ -n "$dir" ] && managed_tree "$main" "$branch" "$dir" || die "no managed worktree for $branch"
   sess=$(sess_name "$repo" "$slug")
   [ -d "$dir" ] || die "no worktree for $branch at $dir"
   [ "$dir" != "$main" ] || die "cannot remove the main worktree"
+  old_sess=$(sess_name "$(basename "$main")" "$(slugify "$branch")")
+  if [ "$dir" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ] &&
+     tmux has-session -t "=$old_sess" 2>/dev/null; then
+    die "old session $old_sess is still open; close it before removing $branch"
+  fi
 
   dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
   if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
@@ -576,6 +686,9 @@ cmd_rm() {
   printf 'will remove:\n  session  %s\n  worktree %s\n  branch   %s (only if merged)\n' "$sess" "$dir" "$branch" >&2
   printf 'proceed? [y/N] ' >&2; read -r ans
   case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
+
+  current=$(branch_worktree "$main" "$branch" || true)
+  [ "$current" = "$dir" ] || die "worktree for $branch changed; refusing to remove $dir"
 
   evacuate_clients "$sess"
   tmux kill-session -t "=$sess" 2>/dev/null || true
@@ -600,7 +713,7 @@ cmd_rm() {
 # session names of every known tree (guard: never touch non-st sessions)
 known_sessions() {
   list_trees | while IFS=$'\t' read -r repo branch path; do
-    sess_name "$repo" "$(slugify "$branch")"; printf '\n'
+    sess_name "$repo" "$(branch_key "$branch")"; printf '\n'
   done
 }
 
@@ -611,7 +724,7 @@ subtree_sessions() {
   list_trees | while IFS=$'\t' read -r repo branch path; do
     main=$(main_worktree "$path")
     [ "$path" != "$main" ] || continue
-    sess_name "$repo" "$(slugify "$branch")"; printf '\n'
+    sess_name "$repo" "$(branch_key "$branch")"; printf '\n'
   done
 }
 
@@ -636,11 +749,11 @@ ensure_main_fallbacks() {
   list_trees | while IFS=$'\t' read -r repo branch path; do
     main=$(main_worktree "$path")
     [ "$path" != "$main" ] || continue
-    subtree=$(sess_name "$repo" "$(slugify "$branch")")
+    subtree=$(sess_name "$repo" "$(branch_key "$branch")")
     tmux has-session -t "=$subtree" 2>/dev/null || continue
     main_branch=$(git -C "$main" branch --show-current)
     [ -n "$main_branch" ] || main_branch='(detached)'
-    main_sess=$(sess_name "$repo" "$(slugify "$main_branch")")
+    main_sess=$(sess_name "$repo" "$(branch_key "$main_branch")")
     if ! tmux has-session -t "=$main_sess" 2>/dev/null; then
       tmux new-session -d -s "$main_sess" -c "$main" -n shell
     fi
@@ -677,10 +790,13 @@ cmd_down() {
   all=$(known_sessions)
 
   if [ -n "$target" ]; then
-    case $'\n'"$all"$'\n' in
-      *$'\n'"$target"$'\n'*) s=$target;;
-      *) s=$(printf '%s\n' "$all" | grep -i -- "$target" | head -1) || true;;
-    esac
+    s=$(session_for_label "$target" || true)
+    if [ -z "$s" ]; then
+      case $'\n'"$all"$'\n' in
+        *$'\n'"$target"$'\n'*) s=$target;;
+        *) s=$(printf '%s\n' "$all" | grep -i -- "$target" | head -1) || true;;
+      esac
+    fi
     [ -n "$s" ] || die "no tree matching: $target"
   elif [ -n "${TMUX:-}" ]; then
     s=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S')
@@ -754,17 +870,27 @@ cmd_run() {
 
 # launcher used by the agent window; resumes this tree's own conversation
 cmd_harness() {
-  local repo slug marker legacy bin
-  repo=$(basename "$(main_worktree .)")
-  slug=$(slugify "$(git branch --show-current 2>/dev/null || echo detached)")
+  local repo slug marker legacy old_marker bin main branch current_tree
+  main=$(main_worktree .)
+  repo=$(repo_key "$main")
+  branch=$(git branch --show-current 2>/dev/null || true)
+  slug=$(branch_key "${branch:-(detached)}")
   harness_window >/dev/null
   bin=$(harness_bin)
   command -v "$bin" >/dev/null 2>&1 || die "$(harness_label) is selected but '$bin' is not installed"
   marker="$ST_STATE/seen/$repo/$slug.$ST_HARNESS"
-  legacy="$ST_STATE/seen/$repo/$slug"
+  legacy="$ST_STATE/seen/$(basename "$main")/$(slugify "$branch")"
+  old_marker="$legacy.$ST_HARNESS"
+  current_tree=$(branch_worktree "$main" "$branch" || true)
+  if [ -z "$current_tree" ] ||
+     [ ! "$current_tree" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ]; then
+    legacy=''
+    old_marker=''
+  fi
   mkdir -p "$(dirname "$marker")"
   set_agent_status running
-  if [ -f "$marker" ] || { [ "$ST_HARNESS" = claude ] && [ -f "$legacy" ]; }; then
+  if [ -f "$marker" ] || { [ -n "$old_marker" ] && [ -f "$old_marker" ]; } ||
+     { [ "$ST_HARNESS" = claude ] && [ -n "$legacy" ] && [ -f "$legacy" ]; }; then
     case $ST_HARNESS in
       claude) claude --continue || claude;;
       codex) codex resume --last || codex;;
@@ -871,6 +997,7 @@ usage() {
 st — supertree: worktree + tmux + coding-agent harness
 
   st new <branch> [--from <base>] [--bare]   create worktree, bootstrap, open session
+  st trust                                   trust this repo's reviewed .supertree
   st go [query]                              pick a tree (fzf) and switch to it
   st resume [query]                          same as go — reopens a closed tree, agent continues
   st down [branch|--subtrees|--all]          close tree sessions, keep worktrees
@@ -889,6 +1016,7 @@ USAGE
 
 case ${1:-} in
   new)    shift; cmd_new "$@";;
+  trust)  shift; cmd_trust "$@";;
   go)     shift; cmd_go "$@";;
   resume) shift; cmd_go "$@";;
   down)   shift; cmd_down "$@";;
