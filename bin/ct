@@ -276,6 +276,70 @@ cmd_rm() {
   info "removed $sess"
 }
 
+# session names of every known tree (guard: never touch non-ct sessions)
+known_sessions() {
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    sess_name "$repo" "$(slugify "$branch")"; printf '\n'
+  done
+}
+
+live_sessions() {
+  local s
+  known_sessions | while read -r s; do
+    [ -n "$s" ] || continue
+    tmux has-session -t "=$s" 2>/dev/null && printf '%s\n' "$s"
+  done
+}
+
+cmd_down() {
+  local yes=0 target="" s live
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -y|--yes) yes=1; shift;;
+      --all) target=--all; shift;;
+      *) target=$1; shift;;
+    esac
+  done
+
+  if [ "$target" = --all ]; then
+    live=$(live_sessions)
+    [ -n "$live" ] || { info "no tree sessions open"; return 0; }
+    printf 'will close:\n%s\n' "$live" >&2
+    if [ "$yes" = 0 ]; then
+      printf 'unsaved editor buffers are lost. proceed? [y/N] ' >&2; read -r ans
+      case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
+    fi
+    printf '%s\n' "$live" | while read -r s; do tmux kill-session -t "=$s"; done
+    info "closed all tree sessions (worktrees kept)"
+    return 0
+  fi
+
+  local all
+  all=$(known_sessions)
+
+  if [ -n "$target" ]; then
+    case $'\n'"$all"$'\n' in
+      *$'\n'"$target"$'\n'*) s=$target;;
+      *) s=$(printf '%s\n' "$all" | grep -i -- "$target" | head -1) || true;;
+    esac
+    [ -n "$s" ] || die "no tree matching: $target"
+  elif [ -n "${TMUX:-}" ]; then
+    s=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S')
+  else
+    die "usage: ct down [branch|--all]  (no branch only works inside a tree session)"
+  fi
+
+  # guard: only ever kill sessions that belong to a known worktree
+  case $'\n'"$all"$'\n' in
+    *$'\n'"$s"$'\n'*) ;;
+    *) die "$s is not a claude-tree session, refusing to kill it";;
+  esac
+
+  tmux has-session -t "=$s" 2>/dev/null || { info "$s already closed"; return 0; }
+  tmux kill-session -t "=$s"
+  info "closed $s (worktree kept — 'ct resume' brings it back)"
+}
+
 cmd_toggle() {
   local pane cur sess target dir self
   pane=${TMUX_PANE:-}
@@ -343,6 +407,8 @@ ct — worktree + tmux + Claude Code harness
 
   ct new <branch> [--from <base>] [--bare]   create worktree, bootstrap, open session
   ct go [query]                              pick a tree (fzf) and switch to it
+  ct resume [query]                          same as go — reopens a closed tree, Claude continues
+  ct down [branch|--all]                     close the tree's session, keep the worktree
   ct ls                                      list worktrees, session state, dirtiness
   ct rm <branch> [--force]                   kill session, remove worktree, prune branch
   ct doctor                                  check the install
@@ -350,16 +416,20 @@ ct — worktree + tmux + Claude Code harness
 keys (inside tmux)
   M-w   tree picker          M-e   toggle claude <-> vim
   M-1   claude   M-2 vim   M-3 shell
+  M-q   close this tree (session only)
 USAGE
 }
 
 case ${1:-} in
   new)    shift; cmd_new "$@";;
   go)     shift; cmd_go "$@";;
+  resume) shift; cmd_go "$@";;
+  down)   shift; cmd_down "$@";;
   ls)     shift; cmd_ls "$@";;
   rm)     shift; cmd_rm "$@";;
   toggle) shift; cmd_toggle "$@";;
   doctor) shift; cmd_doctor "$@";;
+  _sessions) shift; known_sessions;;
   _run)    shift; cmd_run "$@";;
   _claude) shift; cmd_claude "$@";;
   ''|-h|--help|help) usage;;
