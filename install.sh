@@ -14,6 +14,7 @@ set -euo pipefail
 PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 REPO=dawksh/supertree
+RELEASE_ROOT=${ST_RELEASE_ROOT:-https://github.com/$REPO}
 VERSION=${ST_VERSION:-latest}
 PREFIX=${ST_PREFIX:-$HOME/.local/bin}
 CONFDIR=${ST_CONFDIR:-$HOME/.config/supertree}
@@ -21,11 +22,19 @@ TMUX_CONF=${TMUX_CONF:-$HOME/.tmux.conf}
 CONFIG="$CONFDIR/config"
 HARNESS_OVERRIDE=${ST_HARNESS:-}
 
+command -v curl >/dev/null 2>&1 || { printf 'st: curl is required\n' >&2; exit 1; }
+
 if [ "$VERSION" = latest ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
+  latest_url=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$RELEASE_ROOT/releases/latest") || {
+    printf 'st: could not determine the latest release\n' >&2
+    exit 1
+  }
+  VERSION=${latest_url##*/}
 fi
+case $VERSION in
+  ''|*[!A-Za-z0-9._-]*) printf 'st: invalid release version: %s\n' "$VERSION" >&2; exit 1;;
+esac
+BASE="$RELEASE_ROOT/releases/download/$VERSION"
 
 # ----------------------------------------------------------------- output
 
@@ -223,8 +232,6 @@ install_one() { # cmd, pm, logfile
 
 # ------------------------------------------------------------------ main
 
-command -v curl >/dev/null 2>&1 || die "curl is required"
-
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT
 LOG="$tmpdir/install.log"
 
@@ -279,11 +286,16 @@ fi
 
 # ------------------------------------------------------------- supertree
 
-step "supertree"
+step "supertree $VERSION"
 
 curl -fsSL "$BASE/st"            -o "$tmpdir/st"            || die "could not download st from $BASE"
 curl -fsSL "$BASE/supertree.conf" -o "$tmpdir/supertree.conf" || die "could not download supertree.conf from $BASE"
 head -1 "$tmpdir/st" | grep -q '^#!' || die "downloaded st does not look like a script"
+
+# Release assets keep a development placeholder so the same file can be tagged
+# without a source edit. Record the resolved release in the installed command.
+sed "s|^ST_VERSION='dev'$|ST_VERSION='$VERSION'|" "$tmpdir/st" > "$tmpdir/stamped"
+mv "$tmpdir/stamped" "$tmpdir/st"
 
 mkdir -p "$PREFIX" "$CONFDIR"
 install -m 0755 "$tmpdir/st" "$PREFIX/st"

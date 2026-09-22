@@ -57,7 +57,17 @@ Needs `tmux`, `git`, `fzf`, `nvim`, the configured agent binary, and
 
 ### Update
 
-Re-run the installer. `st` is a single file; nothing else changes.
+```sh
+st update
+```
+
+`st update` checks GitHub for the latest release and installs it immediately when
+a newer version is available. The download is validated and staged before the
+current executable is replaced, so a failed update leaves the existing install
+untouched. Run `st --version` to see the installed version.
+
+Source installs made with the symlink instructions above are not overwritten;
+update those with `git pull` instead.
 
 ---
 
@@ -85,6 +95,7 @@ st rm feat-otp         # done with it: session, worktree and branch go away
 | `st down --all` | Close every tree session. Lists them and asks first. |
 | `st ls` | Every worktree of every known repo: session live or not, `*` if the tree is dirty, path. |
 | `st rm <branch>` | Destructive: kills the session, removes the worktree, deletes the branch if merged. |
+| `st update` | Check for the latest release and install it automatically when available. |
 | `st doctor` | Check dependencies, `PATH`, the symlink, the `~/.tmux.conf` line. |
 
 ### Flags

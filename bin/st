@@ -2,6 +2,8 @@
 # supertree: git worktree + tmux + coding-agent harness
 set -euo pipefail
 
+ST_VERSION='dev'
+
 # tmux may launch this outside an interactive shell
 PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:$PATH"
 
@@ -522,6 +524,63 @@ cmd_doctor() {
   return $ok
 }
 
+# Resolve the path of the script that is currently running without relying on
+# readlink -f, which is not available on macOS.
+st_executable() {
+  local dir
+  case $0 in
+    /*) printf '%s' "$0";;
+    */*) dir=$(cd "$(dirname "$0")" && pwd); printf '%s/%s' "$dir" "$(basename "$0")";;
+    *) command -v -- "$0";;
+  esac
+}
+
+cmd_update() {
+  [ $# -eq 0 ] || die "usage: st update"
+  command -v curl >/dev/null 2>&1 || die "curl is required to update st"
+
+  local release_root latest_url latest self tmp candidate staged cleanup
+  release_root=${ST_RELEASE_ROOT:-https://github.com/dawksh/supertree}
+  latest_url=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$release_root/releases/latest") ||
+    die "could not check for updates"
+  latest=${latest_url##*/}
+  case $latest in
+    ''|*[!A-Za-z0-9._-]*) die "could not determine the latest release";;
+  esac
+
+  if [ "$ST_VERSION" = "$latest" ]; then
+    info "st $ST_VERSION is already the latest version"
+    return 0
+  fi
+  [ "$ST_VERSION" != dev ] || die "development install detected — update it with git"
+
+  self=$(st_executable)
+  [ ! -L "$self" ] || die "source install detected — update it with git"
+  [ -w "$(dirname "$self")" ] || die "cannot update $self (directory is not writable)"
+
+  tmp=$(mktemp -d)
+  candidate="$tmp/st"
+  staged=$(mktemp "$(dirname "$self")/.st.update.XXXXXX")
+  printf -v cleanup 'rm -rf %q; rm -f %q' "$tmp" "$staged"
+  trap "$cleanup" EXIT
+
+  curl -fsSL "$release_root/releases/download/$latest/st" -o "$candidate" ||
+    die "could not download st $latest"
+  head -1 "$candidate" | grep -q '^#!/usr/bin/env bash$' ||
+    die "downloaded update does not look like st"
+
+  # Release assets contain "dev"; stamp the tag into the installed copy.
+  sed "s|^ST_VERSION='dev'$|ST_VERSION='$latest'|" "$candidate" > "$tmp/stamped"
+  candidate="$tmp/stamped"
+  grep -qx "ST_VERSION='$latest'" "$candidate" ||
+    die "downloaded update has invalid version metadata"
+  bash -n "$candidate" || die "downloaded update is not valid bash"
+
+  install -m 0755 "$candidate" "$staged" || die "could not stage update beside $self"
+  mv -f "$staged" "$self" || die "could not replace $self"
+  info "updated st $ST_VERSION -> $latest"
+}
+
 usage() {
   cat <<'USAGE'
 st — supertree: worktree + tmux + coding-agent harness
@@ -532,6 +591,7 @@ st — supertree: worktree + tmux + coding-agent harness
   st down [branch|--all]                     close the tree's session, keep the worktree
   st ls                                      list worktrees, session state, dirtiness
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
+  st update                                  install the latest st release, if newer
   st doctor                                  check the install
 
 keys (inside tmux)
@@ -550,6 +610,8 @@ case ${1:-} in
   rm)     shift; cmd_rm "$@";;
   toggle) shift; cmd_toggle "$@";;
   agent)  shift; cmd_agent "$@";;
+  update) shift; cmd_update "$@";;
+  version|--version|-V) printf 'st %s\n' "$ST_VERSION";;
   doctor) shift; cmd_doctor "$@";;
   _sessions) shift; known_sessions;;
   _run)    shift; cmd_run "$@";;
