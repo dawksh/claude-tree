@@ -109,10 +109,47 @@ build_session() {
   tmux select-window -t "=$sess:claude"
 }
 
+tty_key() { printf '%s' "$1" | tr '/' '-'; }
+
+# remember which session a client came from, so closing a tree can send it back
+# instead of letting tmux detach it (detach-on-destroy defaults to on)
+remember_origin() {
+  local tty cur
+  tty=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#{client_tty}' 2>/dev/null) || return 0
+  cur=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null) || return 0
+  [ -n "$tty" ] && [ -n "$cur" ] && [ "$cur" != "$1" ] || return 0
+  mkdir -p "$CT_STATE/origin"
+  printf '%s\n' "$cur" > "$CT_STATE/origin/$(tty_key "$tty")"
+}
+
+# move every client off $1 before it is killed
+evacuate_clients() {
+  local sess=$1 ttys tty origin other
+  ttys=$(tmux list-clients -t "=$sess" -F '#{client_tty}' 2>/dev/null) || return 0
+  [ -n "$ttys" ] || return 0
+  while read -r tty; do
+    [ -n "$tty" ] || continue
+    origin=$(cat "$CT_STATE/origin/$(tty_key "$tty")" 2>/dev/null) || origin=""
+    if [ -n "$origin" ] && [ "$origin" != "$sess" ] && tmux has-session -t "=$origin" 2>/dev/null; then
+      tmux switch-client -c "$tty" -t "=$origin" 2>/dev/null && continue
+    fi
+    # fall back to the most recently used other session
+    other=$(tmux list-sessions -F '#{session_last_attached}|#{session_name}' 2>/dev/null |
+      sort -rn | cut -d'|' -f2- | grep -vxF -- "$sess" | head -1) || other=""
+    [ -n "$other" ] && tmux switch-client -c "$tty" -t "=$other" 2>/dev/null || true
+  done <<EOF
+$ttys
+EOF
+}
+
 attach() {
   local sess=$1
-  if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$sess"
-  else tmux attach-session -t "=$sess"; fi
+  if [ -n "${TMUX:-}" ]; then
+    remember_origin "$sess"
+    tmux switch-client -t "=$sess"
+  else
+    tmux attach-session -t "=$sess"
+  fi
 }
 
 # repo<TAB>branch<TAB>dir  for every worktree of every known repo
@@ -268,6 +305,7 @@ cmd_rm() {
   printf 'proceed? [y/N] ' >&2; read -r ans
   case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
 
+  evacuate_clients "$sess"
   tmux kill-session -t "=$sess" 2>/dev/null || true
   if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
   else git -C "$main" worktree remove "$dir"; fi
@@ -309,7 +347,7 @@ cmd_down() {
       printf 'unsaved editor buffers are lost. proceed? [y/N] ' >&2; read -r ans
       case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
     fi
-    printf '%s\n' "$live" | while read -r s; do tmux kill-session -t "=$s"; done
+    printf '%s\n' "$live" | while read -r s; do evacuate_clients "$s"; tmux kill-session -t "=$s"; done
     info "closed all tree sessions (worktrees kept)"
     return 0
   fi
@@ -336,6 +374,7 @@ cmd_down() {
   esac
 
   tmux has-session -t "=$s" 2>/dev/null || { info "$s already closed"; return 0; }
+  evacuate_clients "$s"
   tmux kill-session -t "=$s"
   info "closed $s (worktree kept — 'ct resume' brings it back)"
 }

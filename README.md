@@ -151,6 +151,14 @@ it up again.
 **Close the tree** — `M-q` or `ct down`. Kills only the tmux session. Unsaved
 nvim buffers in that session are lost.
 
+Closing never detaches you from tmux. tmux's `detach-on-destroy` is `on` by
+default, so killing the session your client sits in would normally drop you to
+the shell. `ct` moves every attached client off the session first — back to the
+session you came from when `ct` switched you there (remembered per client tty
+under `~/.local/state/claude-tree/origin/`), otherwise to the most recently used
+other session. Same for `ct rm` and `ct down --all`. Your own
+`detach-on-destroy` setting is left alone.
+
 **Close everything** — `ct down --all`, which lists the sessions and asks.
 
 **Come back** — `ct resume [branch]` or `M-w`. The session is rebuilt and Claude
@@ -173,6 +181,7 @@ remove, and asks. The branch is deleted only if it is merged.
 | `~/.local/state/claude-tree/repos` | repos `ct` knows about (appended by `ct new`) |
 | `~/.local/state/claude-tree/idx/<repo>/<slug>` | that tree's `CT_TREE_INDEX` |
 | `~/.local/state/claude-tree/seen/<repo>/<slug>` | marker meaning "Claude has run here", drives `--continue` |
+| `~/.local/state/claude-tree/origin/<tty>` | which session a client came from, so closing a tree returns it there |
 
 A repo only shows up in `ct go` / `ct ls` after its first `ct new`. Override the
 worktree root with `CT_WORKTREE_ROOT`, the state dir with `CT_STATE`.
