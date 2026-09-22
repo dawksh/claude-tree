@@ -9,6 +9,7 @@
 #   ST_NO_TMUX_CONF=1   skip touching ~/.tmux.conf
 #   ST_YES=1            answer yes to every prompt (non-interactive installs)
 #   ST_HARNESS=codex     choose claude, codex, or openrouter without a prompt
+#   ST_WINDOWS='agent shell'  choose and order tmux windows
 set -euo pipefail
 
 PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
@@ -21,6 +22,8 @@ CONFDIR=${ST_CONFDIR:-$HOME/.config/supertree}
 TMUX_CONF=${TMUX_CONF:-$HOME/.tmux.conf}
 CONFIG="$CONFDIR/config"
 HARNESS_OVERRIDE=${ST_HARNESS:-}
+WINDOWS_OVERRIDE_SET=${ST_WINDOWS+x}
+WINDOWS_OVERRIDE=${ST_WINDOWS:-}
 
 command -v curl >/dev/null 2>&1 || { printf 'st: curl is required\n' >&2; exit 1; }
 
@@ -101,11 +104,11 @@ harness_label() {
 
 select_harness() {
   local configured="" choice=""
-  CONFIG_NEEDS_WRITE=0
+  CONFIG_HARNESS_NEEDS_WRITE=0
   if [ -n "$HARNESS_OVERRIDE" ]; then
     harness_valid "$HARNESS_OVERRIDE" || die "invalid ST_HARNESS: $HARNESS_OVERRIDE"
     HARNESS=$HARNESS_OVERRIDE
-    CONFIG_NEEDS_WRITE=1
+    CONFIG_HARNESS_NEEDS_WRITE=1
     return
   fi
   if [ -f "$CONFIG" ]; then
@@ -128,17 +131,57 @@ select_harness() {
     3|openrouter) HARNESS=openrouter;;
     *) die "unknown harness choice: $choice";;
   esac
-  CONFIG_NEEDS_WRITE=1
+  CONFIG_HARNESS_NEEDS_WRITE=1
 }
 
-write_harness_config() {
+windows_valid() {
+  local type seen=' '
+  [ -n "$1" ] || return 1
+  for type in $1; do
+    case $type in agent|vim|shell) ;; *) return 1;; esac
+    case $seen in *" $type "*) return 1;; esac
+    seen="$seen$type "
+  done
+}
+
+windows_include() {
+  case " $WINDOWS " in *" $1 "*) return 0;; *) return 1;; esac
+}
+
+select_windows() {
+  local configured=""
+  CONFIG_WINDOWS_NEEDS_WRITE=0
+  if [ "$WINDOWS_OVERRIDE_SET" = x ]; then
+    windows_valid "$WINDOWS_OVERRIDE" || die "invalid ST_WINDOWS: $WINDOWS_OVERRIDE"
+    WINDOWS=$WINDOWS_OVERRIDE
+    CONFIG_WINDOWS_NEEDS_WRITE=1
+    return
+  fi
+  if [ -f "$CONFIG" ]; then
+    configured=$( ( unset ST_WINDOWS; . "$CONFIG"; printf '%s' "${ST_WINDOWS-__ST_UNSET__}" ) )
+    if [ "$configured" != __ST_UNSET__ ]; then
+      windows_valid "$configured" || die "invalid ST_WINDOWS in $CONFIG: $configured"
+      WINDOWS=$configured
+      return
+    fi
+  fi
+  WINDOWS='agent vim shell'
+  [ -f "$CONFIG" ] || CONFIG_WINDOWS_NEEDS_WRITE=1
+}
+
+write_config() {
   local staged="$tmpdir/config"
-  if [ -f "$CONFIG" ] && [ "$CONFIG_NEEDS_WRITE" = 1 ]; then
-    awk -v harness="$HARNESS" '
-      BEGIN { written=0 }
-      /^ST_HARNESS=/ { if (!written) print "ST_HARNESS=" harness; written=1; next }
+  if [ -f "$CONFIG" ] && { [ "$CONFIG_HARNESS_NEEDS_WRITE" = 1 ] || [ "$CONFIG_WINDOWS_NEEDS_WRITE" = 1 ]; }; then
+    awk -v harness="$HARNESS" -v windows="$WINDOWS" \
+        -v write_harness="$CONFIG_HARNESS_NEEDS_WRITE" -v write_windows="$CONFIG_WINDOWS_NEEDS_WRITE" '
+      BEGIN { harness_written=0; windows_written=0 }
+      /^ST_HARNESS=/ && write_harness { if (!harness_written) print "ST_HARNESS=" harness; harness_written=1; next }
+      /^ST_WINDOWS=/ && write_windows { if (!windows_written) print "ST_WINDOWS=\"" windows "\""; windows_written=1; next }
       { print }
-      END { if (!written) print "ST_HARNESS=" harness }
+      END {
+        if (write_harness && !harness_written) print "ST_HARNESS=" harness
+        if (write_windows && !windows_written) print "ST_WINDOWS=\"" windows "\""
+      }
     ' "$CONFIG" > "$staged"
     install -m 0644 "$staged" "$CONFIG"
   elif [ ! -f "$CONFIG" ]; then
@@ -146,6 +189,7 @@ write_harness_config() {
       '# supertree user config — sourced as shell by st' \
       '# built-ins: claude, codex, openrouter (OpenCode connected to OpenRouter)' \
       "ST_HARNESS=$HARNESS" \
+      "ST_WINDOWS='$WINDOWS'" \
       '' \
       '# Custom harness example:' \
       '# ST_HARNESS=aider' \
@@ -156,7 +200,7 @@ write_harness_config() {
 
 # ------------------------------------------------------------ dependencies
 
-DEPS="tmux git fzf nvim"
+DEPS="tmux git fzf"
 
 dep_why() {
   case $1 in
@@ -239,9 +283,12 @@ title
 rule
 step "agent harness"
 select_harness
+select_windows
 row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS")"
+row "windows" "${GRN}✔${R}" "$WINDOWS"
 harness_cmd=$(harness_bin "$HARNESS")
-[ -n "$harness_cmd" ] && DEPS="$DEPS $harness_cmd"
+windows_include vim && DEPS="$DEPS nvim"
+windows_include agent && [ -n "$harness_cmd" ] && DEPS="$DEPS $harness_cmd"
 
 step "dependencies"
 
@@ -304,8 +351,9 @@ ok "st           $PREFIX/st"
 sed "s|~/.local/bin/st|$PREFIX/st|g" "$tmpdir/supertree.conf" > "$CONFDIR/supertree.conf"
 ok "bindings     $CONFDIR/supertree.conf"
 
-write_harness_config
+write_config
 ok "harness      $(harness_label "$HARNESS") ($CONFIG)"
+ok "windows      $WINDOWS"
 
 if [ "${ST_NO_TMUX_CONF:-0}" != 1 ]; then
   if [ -f "$TMUX_CONF" ] && grep -q 'supertree.conf' "$TMUX_CONF"; then
@@ -332,6 +380,6 @@ printf '  %sst new <branch>%s    from inside any git repo\n' "$B" "$R"
 if [ "$HARNESS" = openrouter ]; then
   printf '  %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
 fi
-printf '  %sM-w%s picker   %sM-e%s agent↔vim   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
+printf '  %sM-w%s picker   %sM-e%s toggle windows   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
 rule
 printf '\n'

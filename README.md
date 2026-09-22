@@ -1,11 +1,12 @@
 # supertree
 
-Work on several branches of the same repo at once, each in its own git worktree,
-each with its own tmux session, each with your chosen coding agent and nvim
+Work on several branches of the same repo at once, each in its own git worktree
+and configurable tmux session, with your chosen coding agent and terminal tools
 already running.
 
-One key switches between trees, one key flips agent ↔ nvim, one key closes a
-tree. Reopening a tree puts the agent back in the same conversation.
+One key switches between trees, one key flips between your primary windows, and
+one key closes a tree. Reopening a tree puts the agent back in the same
+conversation.
 
 ```
 tmux sessions
@@ -23,10 +24,10 @@ curl -fsSL https://github.com/dawksh/supertree/releases/latest/download/install.
 ```
 
 The installer first asks which coding-agent harness to use: Claude Code, Codex,
-or OpenRouter via OpenCode. It writes the choice to
-`~/.config/supertree/config`, checks `tmux`, `git`, `fzf`, `nvim` and the chosen
-agent, and offers to install anything missing. Nothing is installed without a
-yes; if there is no terminal to answer on, it skips and carries on.
+or OpenRouter via OpenCode. It writes the choice and default window layout to
+`~/.config/supertree/config`, checks the dependencies required by that layout,
+and offers to install anything missing. Nothing is installed without a yes; if
+there is no terminal to answer on, it skips and carries on.
 
 Then it installs `st` to `~/.local/bin`, the tmux fragment to
 `~/.config/supertree/`, and adds one `source-file` line to `~/.tmux.conf`
@@ -41,6 +42,7 @@ ST_CONFDIR=~/.tmux …    put the tmux fragment somewhere else
 ST_NO_TMUX_CONF=1 …     do not touch ~/.tmux.conf
 ST_YES=1 …              answer yes to every prompt (CI, dotfile bootstraps)
 ST_HARNESS=codex …       choose claude, codex, or openrouter non-interactively
+ST_WINDOWS='agent shell' … choose and order tmux windows
 ```
 
 ### From source
@@ -52,8 +54,8 @@ echo 'source-file ~/projects/supertree/tmux/supertree.conf' >> ~/.tmux.conf
 tmux source-file ~/.tmux.conf      # or prefix + r
 ```
 
-Needs `tmux`, `git`, `fzf`, `nvim`, the configured agent binary, and
-`~/.local/bin` on `PATH`. `st doctor` checks all of it.
+Needs `tmux`, `git`, `fzf`, the programs used by the configured windows, and
+`~/.local/bin` on `PATH`. `st doctor` checks the active layout.
 
 ### Update
 
@@ -109,8 +111,8 @@ st down --all -y                 skip the confirmation
 
 ### Internal
 
-`st agent`, `st toggle`, `st go --picker`, `st _run`, `st _agent`, `st _sessions` are called
-by the tmux bindings, not by hand.
+`st window`, `st agent`, `st toggle`, `st go --picker`, `st _run`, `st _agent`,
+`st _sessions` are called by the tmux bindings, not by hand.
 
 ---
 
@@ -121,8 +123,8 @@ by the tmux bindings, not by hand.
 | key | does |
 |---|---|
 | `M-w` | tree picker (fzf popup), including a `+ new branch…` row |
-| `M-e` | toggle agent ↔ vim in the current tree |
-| `M-1` / `M-2` / `M-3` | agent / vim / shell window |
+| `M-e` | toggle between the first two configured windows |
+| `M-1` / `M-2` / `M-3` | select a configured window by position |
 | `M-q` | close this tree, asks first (worktree kept) |
 
 Prefix stays `C-a`. `M-arrow` pane movement and `S-Enter` are untouched.
@@ -143,9 +145,36 @@ Session names are `<repo>/<branch>`, with `.` and `:` replaced by `-` (tmux
 forbids them). Windows are addressed by **name**, not index, so your
 `base-index` setting is irrelevant.
 
-Each window runs its program directly, then drops to an interactive shell in the
-same worktree. Quitting the agent or nvim leaves you in a shell there instead of
-closing the window.
+Each program window drops to an interactive shell in the same worktree when its
+program exits. Window order and selection are configurable.
+
+## Windows
+
+Set `ST_WINDOWS` in `~/.config/supertree/config` to choose which tmux windows
+each tree receives and the order in which they appear:
+
+```sh
+# Default terminal-editor layout
+ST_WINDOWS='agent vim shell'
+
+# VS Code or another external editor
+ST_WINDOWS='agent shell'
+
+# No coding-agent window
+ST_WINDOWS='vim shell'
+
+# Minimal session
+ST_WINDOWS='shell'
+```
+
+The supported logical names are `agent`, `vim`, and `shell`. `agent` resolves to
+the configured harness name, such as `codex`, so changing `ST_HARNESS` does not
+require changing the window list. At least one unique window is required.
+
+Order controls startup focus, `M-1` through `M-3`, and the pair switched by
+`M-e`. Changing the setting affects new sessions; run `st down <tree>` and
+`st resume <tree>` to rebuild an existing session. Re-run the installer once
+after upgrading from v0.3.0 so the positional tmux bindings are installed.
 
 ## Agent harnesses
 
@@ -224,7 +253,7 @@ repos; do not point `st` at a checkout you do not trust.
 configured agent window if it has been closed.
 
 **Close the tree** — `M-q` or `st down`. Kills only the tmux session. Unsaved
-nvim buffers in that session are lost.
+editor buffers in that session are lost.
 
 Closing never detaches you from tmux. tmux's `detach-on-destroy` is `on` by
 default, so killing the session your client sits in would normally drop you to

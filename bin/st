@@ -17,14 +17,18 @@ ST_CONFIG="${ST_CONFIG:-$HOME/.config/supertree/config}"
 _env_harness=${ST_HARNESS:-}
 _env_harness_command=${ST_HARNESS_COMMAND:-}
 _env_harness_resume_command=${ST_HARNESS_RESUME_COMMAND:-}
+_env_windows_set=${ST_WINDOWS+x}
+_env_windows=${ST_WINDOWS:-}
 # shellcheck disable=SC1090
 [ -f "$ST_CONFIG" ] && . "$ST_CONFIG"
 [ -n "$_env_harness" ] && ST_HARNESS=$_env_harness
 [ -n "$_env_harness_command" ] && ST_HARNESS_COMMAND=$_env_harness_command
 [ -n "$_env_harness_resume_command" ] && ST_HARNESS_RESUME_COMMAND=$_env_harness_resume_command
+[ "$_env_windows_set" = x ] && ST_WINDOWS=$_env_windows
 ST_HARNESS=${ST_HARNESS:-claude}
 ST_HARNESS_COMMAND=${ST_HARNESS_COMMAND:-}
 ST_HARNESS_RESUME_COMMAND=${ST_HARNESS_RESUME_COMMAND:-}
+ST_WINDOWS=${ST_WINDOWS-'agent vim shell'}
 
 die()  { printf 'st: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2m::\033[0m %s\n' "$*" >&2; }
@@ -56,6 +60,45 @@ harness_label() {
     openrouter) printf 'OpenRouter via OpenCode';;
     *) harness_window;;
   esac
+}
+
+window_name() {
+  case $1 in
+    agent) harness_window;;
+    vim|shell) printf '%s' "$1";;
+    *) die "unknown window type '$1' (choose from: agent vim shell)";;
+  esac
+}
+
+# Print validated logical window types, one per line. The order controls tmux
+# window order, startup focus, numbered shortcuts, and the toggle pair.
+configured_windows() {
+  local type name seen_types=' ' seen_names=' '
+  [ -n "$ST_WINDOWS" ] || die "ST_WINDOWS must contain at least one of: agent vim shell"
+  for type in $ST_WINDOWS; do
+    case $type in
+      agent|vim|shell) ;;
+      *) die "unknown window type '$type' in ST_WINDOWS (choose from: agent vim shell)";;
+    esac
+    case $seen_types in
+      *" $type "*) die "duplicate window type '$type' in ST_WINDOWS";;
+    esac
+    name=$(window_name "$type")
+    case $seen_names in
+      *" $name "*) die "configured windows resolve to duplicate tmux name '$name'";;
+    esac
+    seen_types="$seen_types$type "
+    seen_names="$seen_names$name "
+    printf '%s\n' "$type"
+  done
+}
+
+window_enabled() {
+  local wanted=$1 type
+  while read -r type; do [ "$type" = "$wanted" ] && return 0; done <<EOF
+$(configured_windows)
+EOF
+  return 1
 }
 
 main_worktree() {
@@ -143,15 +186,38 @@ bootstrap() {
 
 st_self() { command -v st 2>/dev/null || printf '%s' "$HOME/.local/bin/st"; }
 
-build_session() {
-  local sess=$1 dir=$2 self agent
-  tmux has-session -t "=$sess" 2>/dev/null && return 0
+create_window() {
+  local sess=$1 dir=$2 type=$3 initial=$4 self name
   self=$(st_self)
-  agent=$(harness_window)
-  tmux new-session -d -s "$sess" -c "$dir" -n "$agent" "$self _run _agent"
-  tmux new-window  -d -t "=$sess" -c "$dir" -n vim   "$self _run nvim"
-  tmux new-window  -d -t "=$sess" -c "$dir" -n shell
-  tmux select-window -t "=$sess:$agent"
+  name=$(window_name "$type")
+  if [ "$initial" = 1 ]; then
+    case $type in
+      agent) tmux new-session -d -s "$sess" -c "$dir" -n "$name" "$self _run _agent";;
+      vim) tmux new-session -d -s "$sess" -c "$dir" -n "$name" "$self _run nvim";;
+      shell) tmux new-session -d -s "$sess" -c "$dir" -n "$name";;
+    esac
+  else
+    case $type in
+      agent) tmux new-window -d -t "=$sess" -c "$dir" -n "$name" "$self _run _agent";;
+      vim) tmux new-window -d -t "=$sess" -c "$dir" -n "$name" "$self _run nvim";;
+      shell) tmux new-window -d -t "=$sess" -c "$dir" -n "$name";;
+    esac
+  fi
+}
+
+build_session() {
+  local sess=$1 dir=$2 windows type first_name='' initial=1
+  tmux has-session -t "=$sess" 2>/dev/null && return 0
+  windows=$(configured_windows)
+  while read -r type; do
+    [ -n "$type" ] || continue
+    [ -n "$first_name" ] || first_name=$(window_name "$type")
+    create_window "$sess" "$dir" "$type" "$initial"
+    initial=0
+  done <<EOF
+$windows
+EOF
+  tmux select-window -t "=$sess:$first_name"
 }
 
 tty_key() { printf '%s' "$1" | tr '/' '-'; }
@@ -430,36 +496,45 @@ cmd_down() {
 }
 
 cmd_toggle() {
-  local pane cur sess target dir self
+  local pane cur first second first_name target
   pane=${TMUX_PANE:-}
   if [ -n "$pane" ]; then
     cur=$(tmux display-message -p -t "$pane" '#W')
-    sess=$(tmux display-message -p -t "$pane" '#S')
   else
-    cur=$(tmux display-message -p '#W'); sess=$(tmux display-message -p '#S')
+    cur=$(tmux display-message -p '#W')
   fi
-  target=$(harness_window)
-  if [ "$cur" = "$target" ]; then target=vim; fi
-  tmux select-window -t "=$sess:$target" 2>/dev/null && return 0
-  dir=$(tmux display-message -p -t "${pane:-$sess}" '#{pane_current_path}')
-  self=$(st_self)
-  if [ "$target" = vim ]; then
-    tmux new-window -t "=$sess" -c "$dir" -n vim "$self _run nvim"
-  else
-    tmux new-window -t "=$sess" -c "$dir" -n "$target" "$self _run _agent"
-  fi
+  first=$(configured_windows | sed -n '1p')
+  second=$(configured_windows | sed -n '2p')
+  [ -n "$second" ] || { info "toggle needs at least two configured windows"; return 0; }
+  first_name=$(window_name "$first")
+  if [ "$cur" = "$first_name" ]; then target=$second; else target=$first; fi
+  select_window_type "$target"
 }
 
-cmd_agent() {
-  local pane sess target dir self
+select_window_type() {
+  local type=$1 pane sess name dir
+  window_enabled "$type" || { info "$type window is not enabled in ST_WINDOWS"; return 0; }
   pane=${TMUX_PANE:-}
   if [ -n "$pane" ]; then sess=$(tmux display-message -p -t "$pane" '#S')
   else sess=$(tmux display-message -p '#S'); fi
-  target=$(harness_window)
-  tmux select-window -t "=$sess:$target" 2>/dev/null && return 0
+  name=$(window_name "$type")
+  tmux select-window -t "=$sess:$name" 2>/dev/null && return 0
   dir=$(tmux display-message -p -t "${pane:-$sess}" '#{pane_current_path}')
-  self=$(st_self)
-  tmux new-window -t "=$sess" -c "$dir" -n "$target" "$self _run _agent"
+  create_window "$sess" "$dir" "$type" 0
+  tmux select-window -t "=$sess:$name"
+}
+
+cmd_window() {
+  local slot=${1:-} type
+  case $slot in ''|*[!0-9]*|0) die "usage: st window <positive slot>";; esac
+  type=$(configured_windows | sed -n "${slot}p")
+  [ -n "$type" ] || { info "no window configured for slot $slot"; return 0; }
+  select_window_type "$type"
+}
+
+# Compatibility for v0.3.0 tmux fragments, whose M-1 binding calls `st agent`.
+cmd_agent() {
+  select_window_type agent
 }
 
 # window entrypoint: run the program, then drop to a shell in the same tree
@@ -506,9 +581,11 @@ cmd_harness() {
 }
 
 cmd_doctor() {
-  local ok=0 b agent_bin
-  agent_bin=$(harness_bin)
-  for b in tmux git fzf nvim "$agent_bin"; do
+  local ok=0 b deps='tmux git fzf' agent_bin windows
+  windows=$(configured_windows)
+  window_enabled vim && deps="$deps nvim"
+  if window_enabled agent; then agent_bin=$(harness_bin); deps="$deps $agent_bin"; fi
+  for b in $deps; do
     if command -v "$b" >/dev/null 2>&1; then printf '  ok    %s\n' "$b"
     else printf '  MISS  %s\n' "$b"; ok=1; fi
   done
@@ -520,6 +597,7 @@ cmd_doctor() {
   printf '  --    worktree root %s\n' "$ST_WORKTREE_ROOT"
   printf '  --    repos known   %s\n' "$( [ -f "$ST_REPOS" ] && wc -l < "$ST_REPOS" | tr -d ' ' || echo 0)"
   printf '  --    harness       %s (%s)\n' "$(harness_label)" "$ST_HARNESS"
+  printf '  --    windows       %s\n' "$(printf '%s' "$windows" | tr '\n' ' ')"
   printf '  --    config        %s\n' "$ST_CONFIG"
   return $ok
 }
@@ -592,11 +670,11 @@ st — supertree: worktree + tmux + coding-agent harness
   st ls                                      list worktrees, session state, dirtiness
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
   st update                                  install the latest st release, if newer
-  st doctor                                  check the install
+  st doctor                                  check the install and configured windows
 
 keys (inside tmux)
-  M-w   tree picker          M-e   toggle agent <-> vim
-  M-1   agent    M-2 vim   M-3 shell
+  M-w   tree picker          M-e   toggle first <-> second configured window
+  M-1 / M-2 / M-3           select configured window by position
   M-q   close this tree (session only)
 USAGE
 }
@@ -609,6 +687,7 @@ case ${1:-} in
   ls)     shift; cmd_ls "$@";;
   rm)     shift; cmd_rm "$@";;
   toggle) shift; cmd_toggle "$@";;
+  window) shift; cmd_window "$@";;
   agent)  shift; cmd_agent "$@";;
   update) shift; cmd_update "$@";;
   version|--version|-V) printf 'st %s\n' "$ST_VERSION";;

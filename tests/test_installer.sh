@@ -58,9 +58,26 @@ grep -qx 'ST_HARNESS=codex' "$ST_CONFDIR/config" || {
   printf 'FAIL: installer did not persist the harness choice\n' >&2
   exit 1
 }
-grep -F "$ST_PREFIX/st agent" "$ST_CONFDIR/supertree.conf" >/dev/null || {
-  printf 'FAIL: tmux agent binding did not use the install prefix\n' >&2
+grep -qx "ST_WINDOWS='agent vim shell'" "$ST_CONFDIR/config" || {
+  printf 'FAIL: installer did not persist the default window layout\n' >&2
+  exit 1
+}
+grep -F "$ST_PREFIX/st window 1" "$ST_CONFDIR/supertree.conf" >/dev/null || {
+  printf 'FAIL: tmux window binding did not use the install prefix\n' >&2
   exit 1
 }
 
-printf 'ok: installer harness selection and config\n'
+# A layout override updates the existing config and omits disabled dependencies.
+export ST_WINDOWS='agent shell'
+rm "$HOME/.local/bin/nvim"
+output=$("$ROOT/install.sh")
+grep -qx 'ST_WINDOWS="agent shell"' "$ST_CONFDIR/config" || {
+  printf 'FAIL: installer did not update the window layout\n' >&2
+  exit 1
+}
+if grep -Eq '^  . nvim ' <<<"$output"; then
+  printf 'FAIL: installer checked nvim for a layout without vim\n' >&2
+  exit 1
+fi
+
+printf 'ok: installer harness selection, window config, and dependencies\n'
