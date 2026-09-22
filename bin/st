@@ -1,18 +1,60 @@
 #!/usr/bin/env bash
-# supertree: git worktree + tmux + Claude Code harness
+# supertree: git worktree + tmux + coding-agent harness
 set -euo pipefail
 
 # tmux may launch this outside an interactive shell
-PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:$PATH"
 
 ST_WORKTREE_ROOT="${ST_WORKTREE_ROOT:-$HOME/projects/.worktrees}"
 ST_STATE="${ST_STATE:-$HOME/.local/state/supertree}"
 ST_REPOS="$ST_STATE/repos"
+ST_CONFIG="${ST_CONFIG:-$HOME/.config/supertree/config}"
+
+# Config is shell syntax, like .supertree. Environment variables win so a
+# one-off `ST_HARNESS=codex st new ...` does what it says.
+_env_harness=${ST_HARNESS:-}
+_env_harness_command=${ST_HARNESS_COMMAND:-}
+_env_harness_resume_command=${ST_HARNESS_RESUME_COMMAND:-}
+# shellcheck disable=SC1090
+[ -f "$ST_CONFIG" ] && . "$ST_CONFIG"
+[ -n "$_env_harness" ] && ST_HARNESS=$_env_harness
+[ -n "$_env_harness_command" ] && ST_HARNESS_COMMAND=$_env_harness_command
+[ -n "$_env_harness_resume_command" ] && ST_HARNESS_RESUME_COMMAND=$_env_harness_resume_command
+ST_HARNESS=${ST_HARNESS:-claude}
+ST_HARNESS_COMMAND=${ST_HARNESS_COMMAND:-}
+ST_HARNESS_RESUME_COMMAND=${ST_HARNESS_RESUME_COMMAND:-}
 
 die()  { printf 'st: %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2m::\033[0m %s\n' "$*" >&2; }
 
 slugify() { printf '%s' "$1" | tr '/.: ' '----'; }
+
+harness_window() {
+  case $ST_HARNESS in
+    claude|codex|openrouter) printf '%s' "$ST_HARNESS";;
+    *[!A-Za-z0-9_-]*|'') die "invalid ST_HARNESS: $ST_HARNESS";;
+    *) [ -n "$ST_HARNESS_COMMAND" ] || die "unknown harness '$ST_HARNESS' (set ST_HARNESS_COMMAND)"
+       printf '%s' "$ST_HARNESS";;
+  esac
+}
+
+harness_bin() {
+  case $ST_HARNESS in
+    claude) printf 'claude';;
+    codex) printf 'codex';;
+    openrouter) printf 'opencode';;
+    *) harness_window >/dev/null; printf '%s' "${ST_HARNESS_COMMAND%% *}";;
+  esac
+}
+
+harness_label() {
+  case $ST_HARNESS in
+    claude) printf 'Claude Code';;
+    codex) printf 'Codex';;
+    openrouter) printf 'OpenRouter via OpenCode';;
+    *) harness_window;;
+  esac
+}
 
 main_worktree() {
   git -C "${1:-.}" worktree list --porcelain 2>/dev/null |
@@ -100,13 +142,14 @@ bootstrap() {
 st_self() { command -v st 2>/dev/null || printf '%s' "$HOME/.local/bin/st"; }
 
 build_session() {
-  local sess=$1 dir=$2 self
+  local sess=$1 dir=$2 self agent
   tmux has-session -t "=$sess" 2>/dev/null && return 0
   self=$(st_self)
-  tmux new-session -d -s "$sess" -c "$dir" -n claude "$self _run _claude"
+  agent=$(harness_window)
+  tmux new-session -d -s "$sess" -c "$dir" -n "$agent" "$self _run _agent"
   tmux new-window  -d -t "=$sess" -c "$dir" -n vim   "$self _run nvim"
   tmux new-window  -d -t "=$sess" -c "$dir" -n shell
-  tmux select-window -t "=$sess:claude"
+  tmux select-window -t "=$sess:$agent"
 }
 
 tty_key() { printf '%s' "$1" | tr '/' '-'; }
@@ -205,7 +248,7 @@ cmd_new() {
     build_session "$sess" "$dir"
     attach "$sess"
   else
-    info "bare: skipped deps, env and claude"
+    info "bare: skipped deps, env and agent"
     printf '%s\n' "$dir"
   fi
 }
@@ -310,7 +353,12 @@ cmd_rm() {
   if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
   else git -C "$main" worktree remove "$dir"; fi
   git -C "$main" branch -d "$branch" 2>/dev/null || info "branch $branch kept (not merged)"
-  rm -f "$ST_STATE/idx/$repo/$slug" "$ST_STATE/seen/$repo/$slug"
+  rm -f "$ST_STATE/idx/$repo/$slug" \
+    "$ST_STATE/seen/$repo/$slug" \
+    "$ST_STATE/seen/$repo/$slug.$ST_HARNESS" \
+    "$ST_STATE/seen/$repo/$slug.claude" \
+    "$ST_STATE/seen/$repo/$slug.codex" \
+    "$ST_STATE/seen/$repo/$slug.openrouter"
   info "removed $sess"
 }
 
@@ -388,49 +436,80 @@ cmd_toggle() {
   else
     cur=$(tmux display-message -p '#W'); sess=$(tmux display-message -p '#S')
   fi
-  if [ "$cur" = claude ]; then target=vim; else target=claude; fi
+  target=$(harness_window)
+  if [ "$cur" = "$target" ]; then target=vim; fi
   tmux select-window -t "=$sess:$target" 2>/dev/null && return 0
   dir=$(tmux display-message -p -t "${pane:-$sess}" '#{pane_current_path}')
   self=$(st_self)
   if [ "$target" = vim ]; then
     tmux new-window -t "=$sess" -c "$dir" -n vim "$self _run nvim"
   else
-    tmux new-window -t "=$sess" -c "$dir" -n claude "$self _run _claude"
+    tmux new-window -t "=$sess" -c "$dir" -n "$target" "$self _run _agent"
   fi
+}
+
+cmd_agent() {
+  local pane sess target dir self
+  pane=${TMUX_PANE:-}
+  if [ -n "$pane" ]; then sess=$(tmux display-message -p -t "$pane" '#S')
+  else sess=$(tmux display-message -p '#S'); fi
+  target=$(harness_window)
+  tmux select-window -t "=$sess:$target" 2>/dev/null && return 0
+  dir=$(tmux display-message -p -t "${pane:-$sess}" '#{pane_current_path}')
+  self=$(st_self)
+  tmux new-window -t "=$sess" -c "$dir" -n "$target" "$self _run _agent"
 }
 
 # window entrypoint: run the program, then drop to a shell in the same tree
 cmd_run() {
   case ${1:-} in
-    _claude) cmd_claude || true;;
+    _agent) cmd_harness || true;;
+    _claude) ST_HARNESS=claude cmd_harness || true;; # old live sessions
     *) "$@" || true;;
   esac
   exec "${SHELL:-/bin/zsh}" -i
 }
 
-# launcher used by the claude window; resumes this tree's own conversation
-cmd_claude() {
-  local repo slug marker
+# launcher used by the agent window; resumes this tree's own conversation
+cmd_harness() {
+  local repo slug marker legacy bin
   repo=$(basename "$(main_worktree .)")
   slug=$(slugify "$(git branch --show-current 2>/dev/null || echo detached)")
-  marker="$ST_STATE/seen/$repo/$slug"
+  harness_window >/dev/null
+  bin=$(harness_bin)
+  command -v "$bin" >/dev/null 2>&1 || die "$(harness_label) is selected but '$bin' is not installed"
+  marker="$ST_STATE/seen/$repo/$slug.$ST_HARNESS"
+  legacy="$ST_STATE/seen/$repo/$slug"
   mkdir -p "$(dirname "$marker")"
-  if [ -f "$marker" ]; then
-    claude --continue || claude
+  if [ -f "$marker" ] || { [ "$ST_HARNESS" = claude ] && [ -f "$legacy" ]; }; then
+    case $ST_HARNESS in
+      claude) claude --continue || claude;;
+      codex) codex resume --last || codex;;
+      openrouter) opencode --continue || opencode;;
+      *) if [ -n "$ST_HARNESS_RESUME_COMMAND" ]; then
+           eval "$ST_HARNESS_RESUME_COMMAND" || eval "$ST_HARNESS_COMMAND"
+         else
+           eval "$ST_HARNESS_COMMAND"
+         fi;;
+    esac
   else
     : > "$marker"
-    claude
+    case $ST_HARNESS in
+      claude) claude;;
+      codex) codex;;
+      openrouter) opencode;;
+      *) eval "$ST_HARNESS_COMMAND";;
+    esac
   fi
 }
 
 cmd_doctor() {
-  local ok=0 b
-  for b in tmux git fzf nvim claude; do
+  local ok=0 b agent_bin
+  agent_bin=$(harness_bin)
+  for b in tmux git fzf nvim "$agent_bin"; do
     if command -v "$b" >/dev/null 2>&1; then printf '  ok    %s\n' "$b"
     else printf '  MISS  %s\n' "$b"; ok=1; fi
   done
-  case ":$PATH:" in *":$HOME/.local/bin:"*) printf '  ok    ~/.local/bin on PATH\n';;
-    *) printf '  MISS  ~/.local/bin not on PATH\n'; ok=1;; esac
   local self; self=$(command -v st 2>/dev/null) || self=""
   if [ -n "$self" ]; then printf '  ok    st on PATH (%s)\n' "$self"
   else printf '  MISS  st not on PATH\n'; ok=1; fi
@@ -438,24 +517,26 @@ cmd_doctor() {
   else printf '  MISS  ~/.tmux.conf does not source supertree.conf\n'; ok=1; fi
   printf '  --    worktree root %s\n' "$ST_WORKTREE_ROOT"
   printf '  --    repos known   %s\n' "$( [ -f "$ST_REPOS" ] && wc -l < "$ST_REPOS" | tr -d ' ' || echo 0)"
+  printf '  --    harness       %s (%s)\n' "$(harness_label)" "$ST_HARNESS"
+  printf '  --    config        %s\n' "$ST_CONFIG"
   return $ok
 }
 
 usage() {
   cat <<'USAGE'
-st — supertree: worktree + tmux + Claude Code harness
+st — supertree: worktree + tmux + coding-agent harness
 
   st new <branch> [--from <base>] [--bare]   create worktree, bootstrap, open session
   st go [query]                              pick a tree (fzf) and switch to it
-  st resume [query]                          same as go — reopens a closed tree, Claude continues
+  st resume [query]                          same as go — reopens a closed tree, agent continues
   st down [branch|--all]                     close the tree's session, keep the worktree
   st ls                                      list worktrees, session state, dirtiness
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
   st doctor                                  check the install
 
 keys (inside tmux)
-  M-w   tree picker          M-e   toggle claude <-> vim
-  M-1   claude   M-2 vim   M-3 shell
+  M-w   tree picker          M-e   toggle agent <-> vim
+  M-1   agent    M-2 vim   M-3 shell
   M-q   close this tree (session only)
 USAGE
 }
@@ -468,10 +549,12 @@ case ${1:-} in
   ls)     shift; cmd_ls "$@";;
   rm)     shift; cmd_rm "$@";;
   toggle) shift; cmd_toggle "$@";;
+  agent)  shift; cmd_agent "$@";;
   doctor) shift; cmd_doctor "$@";;
   _sessions) shift; known_sessions;;
   _run)    shift; cmd_run "$@";;
-  _claude) shift; cmd_claude "$@";;
+  _agent)  shift; cmd_harness "$@";;
+  _claude) shift; ST_HARNESS=claude cmd_harness "$@";;
   ''|-h|--help|help) usage;;
   *) die "unknown command: $1 (try: st help)";;
 esac
