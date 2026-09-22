@@ -18,11 +18,18 @@ tmux sessions
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/dawksh/supertree/main/install.sh | bash
+curl -fsSL https://github.com/dawksh/supertree/releases/latest/download/install.sh | bash
 ```
 
-Installs `st` to `~/.local/bin`, the tmux fragment to `~/.config/supertree/`,
-and adds one `source-file` line to `~/.tmux.conf` (backing it up first).
+The installer checks for `tmux`, `git`, `fzf`, `nvim` and `claude`, shows which
+are missing and what each one is needed for, and offers to install them with
+your package manager — Homebrew, apt, dnf, pacman or apk. Claude Code comes from
+its own installer, or the `claude-code` cask on Homebrew. Nothing is installed
+without a yes; if there is no terminal to answer on, it skips and carries on.
+
+Then it installs `st` to `~/.local/bin`, the tmux fragment to
+`~/.config/supertree/`, and adds one `source-file` line to `~/.tmux.conf`
+(backing it up first).
 
 Overrides:
 
@@ -31,6 +38,7 @@ ST_VERSION=v0.1.0 …     pin a release instead of latest
 ST_PREFIX=~/bin …       install st somewhere else
 ST_CONFDIR=~/.tmux …    put the tmux fragment somewhere else
 ST_NO_TMUX_CONF=1 …     do not touch ~/.tmux.conf
+ST_YES=1 …              answer yes to every prompt (CI, dotfile bootstraps)
 ```
 
 ### From source
