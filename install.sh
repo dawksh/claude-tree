@@ -8,13 +8,18 @@
 #   ST_CONFDIR=~/.conf  where the tmux fragment goes    (default ~/.config/supertree)
 #   ST_NO_TMUX_CONF=1   skip touching ~/.tmux.conf
 #   ST_YES=1            answer yes to every prompt (non-interactive installs)
+#   ST_HARNESS=codex     choose claude, codex, or openrouter without a prompt
 set -euo pipefail
+
+PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
 
 REPO=dawksh/supertree
 VERSION=${ST_VERSION:-latest}
 PREFIX=${ST_PREFIX:-$HOME/.local/bin}
 CONFDIR=${ST_CONFDIR:-$HOME/.config/supertree}
 TMUX_CONF=${TMUX_CONF:-$HOME/.tmux.conf}
+CONFIG="$CONFDIR/config"
+HARNESS_OVERRIDE=${ST_HARNESS:-}
 
 if [ "$VERSION" = latest ]; then
   BASE="https://github.com/$REPO/releases/latest/download"
@@ -37,7 +42,7 @@ if [ -t 1 ]; then CLEAR='\033[2K\r'; else CLEAR='\n'; fi
 rule() { printf '%s' "$D"; printf '─%.0s' $(seq 1 $WIDTH); printf '%s\n' "$R"; }
 title() {
   printf '\n  %ssupertree%s %sinstaller%s\n' "$B" "$R" "$D" "$R"
-  printf '  %sworktree + tmux + Claude Code harness%s\n\n' "$D" "$R"
+  printf '  %sworktree + tmux + coding-agent harness%s\n\n' "$D" "$R"
 }
 step() { printf '\n  %s%s%s\n\n' "$B" "$1" "$R"; }
 ok()   { printf '  %s✔%s %s\n' "$GRN" "$R" "$1"; }
@@ -61,9 +66,88 @@ ask() { # question -> 0 yes, 1 no
   case ${a:-y} in y|Y|yes|YES) return 0;; *) return 1;; esac
 }
 
+# --------------------------------------------------------------- harness
+
+harness_valid() {
+  case $1 in *[!A-Za-z0-9_-]*|'') return 1;; *) return 0;; esac
+}
+
+harness_bin() {
+  case $1 in
+    claude) echo claude;;
+    codex) echo codex;;
+    openrouter) echo opencode;;
+    *) echo "";;
+  esac
+}
+
+harness_label() {
+  case $1 in
+    claude) echo "Claude Code";;
+    codex) echo "Codex";;
+    openrouter) echo "OpenRouter via OpenCode";;
+    *) echo "$1 (custom)";;
+  esac
+}
+
+select_harness() {
+  local configured="" choice=""
+  CONFIG_NEEDS_WRITE=0
+  if [ -n "$HARNESS_OVERRIDE" ]; then
+    harness_valid "$HARNESS_OVERRIDE" || die "invalid ST_HARNESS: $HARNESS_OVERRIDE"
+    HARNESS=$HARNESS_OVERRIDE
+    CONFIG_NEEDS_WRITE=1
+    return
+  fi
+  if [ -f "$CONFIG" ]; then
+    configured=$( ( unset ST_HARNESS; . "$CONFIG"; printf '%s' "${ST_HARNESS:-}" ) )
+    if harness_valid "$configured"; then
+      HARNESS=$configured
+      return
+    fi
+  fi
+  if [ -r /dev/tty ] && [ "${ST_YES:-0}" != 1 ]; then
+    printf '  1  Claude Code %s(default)%s\n' "$D" "$R"
+    printf '  2  Codex\n'
+    printf '  3  OpenRouter %s(via OpenCode)%s\n' "$D" "$R"
+    printf '\n  choose harness %s[1]%s ' "$D" "$R"
+    read -r choice < /dev/tty || choice=""
+  fi
+  case ${choice:-1} in
+    1|claude) HARNESS=claude;;
+    2|codex) HARNESS=codex;;
+    3|openrouter) HARNESS=openrouter;;
+    *) die "unknown harness choice: $choice";;
+  esac
+  CONFIG_NEEDS_WRITE=1
+}
+
+write_harness_config() {
+  local staged="$tmpdir/config"
+  if [ -f "$CONFIG" ] && [ "$CONFIG_NEEDS_WRITE" = 1 ]; then
+    awk -v harness="$HARNESS" '
+      BEGIN { written=0 }
+      /^ST_HARNESS=/ { if (!written) print "ST_HARNESS=" harness; written=1; next }
+      { print }
+      END { if (!written) print "ST_HARNESS=" harness }
+    ' "$CONFIG" > "$staged"
+    install -m 0644 "$staged" "$CONFIG"
+  elif [ ! -f "$CONFIG" ]; then
+    printf '%s\n' \
+      '# supertree user config — sourced as shell by st' \
+      '# built-ins: claude, codex, openrouter (OpenCode connected to OpenRouter)' \
+      "ST_HARNESS=$HARNESS" \
+      '' \
+      '# Custom harness example:' \
+      '# ST_HARNESS=aider' \
+      "# ST_HARNESS_COMMAND='aider'" \
+      "# ST_HARNESS_RESUME_COMMAND='aider --resume'" > "$CONFIG"
+  fi
+}
+
 # ------------------------------------------------------------ dependencies
 
-DEPS="tmux git fzf nvim claude"
+DEPS="tmux git fzf nvim"
 
 dep_why() {
   case $1 in
@@ -71,7 +155,9 @@ dep_why() {
     git)    echo "required for worktrees";;
     fzf)    echo "tree picker (M-w)";;
     nvim)   echo "editor window (M-2)";;
-    claude) echo "claude window (M-1)";;
+    claude) echo "selected agent harness (M-1)";;
+    codex) echo "selected agent harness (M-1)";;
+    opencode) echo "OpenRouter agent harness (M-1)";;
   esac
 }
 
@@ -110,11 +196,18 @@ install_one() { # cmd, pm, logfile
   local cmd=$1 pm=$2 log=$3 pkg S
   pkg=$(pkg_name "$cmd"); S=$(sudo_if_needed)
 
-  # Claude Code ships its own installer; package managers only carry it on brew.
-  # https://code.claude.com/docs/en/setup#install-claude-code
+  # Agent harnesses ship their own installers.
   if [ "$cmd" = claude ]; then
     if [ "$pm" = brew ]; then brew install --cask claude-code >>"$log" 2>&1
     else curl -fsSL https://claude.ai/install.sh | bash >>"$log" 2>&1; fi
+    return
+  fi
+  if [ "$cmd" = codex ]; then
+    curl -fsSL https://chatgpt.com/codex/install.sh | sh >>"$log" 2>&1
+    return
+  fi
+  if [ "$cmd" = opencode ]; then
+    curl -fsSL https://opencode.ai/install | bash >>"$log" 2>&1
     return
   fi
 
@@ -137,6 +230,12 @@ LOG="$tmpdir/install.log"
 
 title
 rule
+step "agent harness"
+select_harness
+row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS")"
+harness_cmd=$(harness_bin "$HARNESS")
+[ -n "$harness_cmd" ] && DEPS="$DEPS $harness_cmd"
+
 step "dependencies"
 
 missing=""
@@ -193,6 +292,9 @@ ok "st           $PREFIX/st"
 sed "s|~/.local/bin/st|$PREFIX/st|g" "$tmpdir/supertree.conf" > "$CONFDIR/supertree.conf"
 ok "bindings     $CONFDIR/supertree.conf"
 
+write_harness_config
+ok "harness      $(harness_label "$HARNESS") ($CONFIG)"
+
 if [ "${ST_NO_TMUX_CONF:-0}" != 1 ]; then
   if [ -f "$TMUX_CONF" ] && grep -q 'supertree.conf' "$TMUX_CONF"; then
     ok "tmux config  already wired up"
@@ -215,6 +317,9 @@ esac
 step "next"
 printf '  %sst doctor%s          verify the install\n' "$B" "$R"
 printf '  %sst new <branch>%s    from inside any git repo\n' "$B" "$R"
-printf '  %sM-w%s picker   %sM-e%s claude↔vim   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
+if [ "$HARNESS" = openrouter ]; then
+  printf '  %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
+fi
+printf '  %sM-w%s picker   %sM-e%s agent↔vim   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
 rule
 printf '\n'
