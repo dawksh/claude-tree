@@ -391,6 +391,6 @@ printf '      %sst new <branch>%s    start from any git repo\n' "$B" "$R"
 if [ "$HARNESS" = openrouter ]; then
   printf '      %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
 fi
-printf '\n      %sM-w%s picker   %sM-e%s toggle   %sM-q%s close\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
+printf '\n      %sM-w%s picker   %sM-e%s toggle   %sM-q%s close   %sM-Q%s subtrees\n\n' "$B" "$R" "$B" "$R" "$B" "$R" "$B" "$R"
 rule
 printf '\n'

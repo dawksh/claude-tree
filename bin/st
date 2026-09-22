@@ -213,11 +213,36 @@ build_session() {
     [ -n "$type" ] || continue
     [ -n "$first_name" ] || first_name=$(window_name "$type")
     create_window "$sess" "$dir" "$type" "$initial"
+    if [ "$type" = agent ]; then
+      tmux set-option -t "$sess" @st_agent_window "$(window_name agent)"
+    fi
     initial=0
   done <<EOF
 $windows
 EOF
   tmux select-window -t "=$sess:$first_name"
+}
+
+remember_recent() {
+  local sess=$1 tmp
+  mkdir -p "$ST_STATE"
+  tmp=$(mktemp "$ST_STATE/.recent.XXXXXX")
+  {
+    printf '%s\n' "$sess"
+    if [ -f "$ST_STATE/recent" ]; then
+      grep -vxF -- "$sess" "$ST_STATE/recent" || true
+    fi
+  } > "$tmp"
+  mv "$tmp" "$ST_STATE/recent"
+}
+
+# Keep unseen trees in Git's order after trees we have opened before.
+sort_recent() {
+  local recent="$ST_STATE/recent"
+  [ -f "$recent" ] || recent=/dev/null
+  awk -F '\t' 'FILENAME == ARGV[1] { rank[$0] = ++n; next }
+    { key = $3; print (key in rank ? rank[key] : 100000 + FNR) "\t" $0 }' \
+    "$recent" - | sort -n -k1,1 | cut -f2-
 }
 
 tty_key() { printf '%s' "$1" | tr '/' '-'; }
@@ -255,6 +280,7 @@ EOF
 
 attach() {
   local sess=$1
+  remember_recent "$sess"
   if [ -n "${TMUX:-}" ]; then
     remember_origin "$sess"
     tmux switch-client -t "=$sess"
@@ -274,6 +300,94 @@ list_trees() {
       /^branch /{b=$2; sub("refs/heads/","",b); print repo"\t"b"\t"p}
       /^detached$/{print repo"\t(detached)\t"p}'
   done < "$ST_REPOS"
+}
+
+agent_pane() {
+  local sess=$1 name
+  name=$(tmux show-options -qv -t "$sess" @st_agent_window 2>/dev/null) || name=""
+  [ -n "$name" ] || name=$(harness_window)
+  tmux list-panes -t "=$sess:$name" -F '#{pane_id}' 2>/dev/null | head -1
+}
+
+# A visible prompt or confirmation near the bottom of the agent pane means the
+# agent is waiting for a person. Other active turns are reported as running.
+agent_needs_input() {
+  local pane=$1 screen
+  screen=$(tmux capture-pane -p -t "$pane" -S -12 2>/dev/null) || return 1
+  printf '%s\n' "$screen" | tail -8 | grep -Eq \
+    '^[[:space:]]*(›|❯)([[:space:]]|$)|\[[yY]/[nN]\][[:space:]]*$'
+}
+
+agent_status() {
+  local sess=$1 pane state command
+  if ! tmux has-session -t "=$sess" 2>/dev/null; then
+    printf 'closed'; return
+  fi
+  pane=$(agent_pane "$sess")
+  [ -n "$pane" ] || { printf 'done'; return; }
+  state=$(tmux show-options -pqv -t "$pane" @st_agent_state 2>/dev/null) || state=""
+  if [ "$state" = done ]; then printf 'done'; return; fi
+  if [ -z "$state" ]; then
+    # Sessions created before status tracking have no pane option yet.
+    command=$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null) || command=""
+    case $command in
+      "$(basename "$(harness_bin)")"|node|bun) ;;
+      *) printf 'done'; return;;
+    esac
+  fi
+  if agent_needs_input "$pane"; then printf 'input'; else printf 'running'; fi
+}
+
+set_agent_status() {
+  [ -n "${TMUX_PANE:-}" ] || return 0
+  tmux set-option -pq -t "$TMUX_PANE" @st_agent_state "$1" 2>/dev/null || true
+}
+
+# Read tmux once for the whole picker. Per-tree status calls make the popup
+# appear empty while dozens of tmux processes finish starting.
+picker_rows() {
+  local panes format name bin label path sess pane
+  format='#{session_name}'$'\t''#{window_name}'$'\t''#{pane_id}'$'\t''#{@st_agent_state}'$'\t''#{@st_agent_window}'$'\t''#{pane_current_command}'
+  panes=$(tmux list-panes -a -F "$format" 2>/dev/null) || panes=''
+  name=$(harness_window)
+  bin=$(harness_bin)
+  bin=${bin##*/}
+
+  list_trees | awk -F '\t' -v default_name="$name" -v bin="$bin" '
+    FILENAME == ARGV[1] {
+      s = $1
+      if (s == "") next
+      live[s] = 1
+      if ($5 != "") agent_window[s] = $5
+      wanted = agent_window[s] != "" ? agent_window[s] : default_name
+      if ($2 == wanted && !(s in agent_pane)) {
+        agent_pane[s] = $3
+        agent_state[s] = $4
+        agent_command[s] = $6
+      }
+      next
+    }
+    {
+      slug = $2
+      gsub(/[\/:. ]/, "-", slug)
+      s = $1 "/" slug
+      if (!(s in live)) { glyph = "·"; status = "closed" }
+      else {
+        glyph = "●"
+        status = "done"
+        if (s in agent_pane && (agent_state[s] == "running" ||
+            (agent_state[s] == "" && (agent_command[s] == bin ||
+             agent_command[s] == "node" || agent_command[s] == "bun"))))
+          status = "running"
+      }
+      printf "%s %-28s %-7s\t%s\t%s\t%s\n", glyph, s, status, $3, s, agent_pane[s]
+    }
+  ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r label path sess pane; do
+    if [ -n "$pane" ] && [ "${label%running}" != "$label" ] && agent_needs_input "$pane"; then
+      label=${label%running}input
+    fi
+    printf '%s\t%s\t%s\n' "$label" "$path" "$sess"
+  done
 }
 
 # ---------------------------------------------------------------- commands
@@ -322,23 +436,30 @@ cmd_new() {
 }
 
 cmd_go() {
-  local picker=0 query=""
+  local query="" popup=0 popup_client=""
   while [ $# -gt 0 ]; do
     case $1 in
-      --picker) picker=1; shift;;
+      --picker) shift;;
+      --popup) [ $# -ge 2 ] || die "usage: st go --popup <tmux-client>"
+               popup=1; popup_client=$2; shift 2;;
       *) query=$1; shift;;
     esac
   done
 
-  local rows sel dir sess
-  rows=$(list_trees | while IFS=$'\t' read -r repo branch path; do
-    local s live
-    s=$(sess_name "$repo" "$(slugify "$branch")")
-    if tmux has-session -t "=$s" 2>/dev/null; then live='●'; else live='·'; fi
-    printf '%s %s\t%s\t%s\n' "$live" "$s" "$path" "$s"
-  done)
+  local rows sel dir sess key branch main
+  if [ "${ST_PICKER_ROWS+x}" = x ]; then rows=$ST_PICKER_ROWS
+  else rows=$(picker_rows | sort_recent); fi
 
   [ -n "$rows" ] || die "no worktrees known yet — run 'st new <branch>' inside a repo"
+
+  if [ "$popup" = 1 ]; then
+    [ -n "$popup_client" ] || die "no tmux client for tree picker"
+    local self
+    self=$(st_executable)
+    tmux display-popup -c "$popup_client" -d "$PWD" -E -w 70% -h 60% \
+      -e "ST_PICKER_ROWS=$rows" "$self go --picker"
+    return
+  fi
 
   if [ -n "$query" ]; then
     sel=$(printf '%s\n' "$rows" | grep -i -- "$query" | head -1) || true
@@ -346,7 +467,21 @@ cmd_go() {
   else
     sel=$(printf '%s\n+ new branch…\t\t\n' "$rows" |
       fzf --delimiter=$'\t' --with-nth=1 --height=100% --reverse \
-          --prompt='tree> ' --preview-window=hidden) || return 0
+          --no-sort --sync \
+          --prompt='tree> ' --preview-window=hidden \
+          --expect=ctrl-d --bind='esc:abort') || return 0
+    key=${sel%%$'\n'*}
+    sel=${sel#*$'\n'}
+    if [ "$key" = ctrl-d ]; then
+      case $sel in '+ new branch'*) return 0;; esac
+      dir=$(printf '%s' "$sel" | cut -f2)
+      branch=$(git -C "$dir" branch --show-current)
+      [ -n "$branch" ] || die "cannot delete a detached worktree from the picker"
+      main=$(main_worktree "$dir")
+      [ "$dir" != "$main" ] || die "cannot delete the main worktree"
+      cmd_rm "$branch" --repo "$main"
+      return
+    fi
   fi
 
   case $sel in
@@ -369,33 +504,59 @@ cmd_go() {
 }
 
 cmd_ls() {
-  local repo branch path s live dirty
-  printf '%-3s %-28s %-8s %s\n' '' 'TREE' 'STATE' 'PATH'
+  local repo branch path s live dirty agent
+  printf '%-3s %-28s %-8s %-8s %s\n' '' 'TREE' 'SESSION' 'AGENT' 'PATH'
   list_trees | while IFS=$'\t' read -r repo branch path; do
     s=$(sess_name "$repo" "$(slugify "$branch")")
     if tmux has-session -t "=$s" 2>/dev/null; then live='live'; else live='-'; fi
+    agent=$(agent_status "$s")
     if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then dirty='*'; else dirty=' '; fi
-    printf '%-3s %-28s %-8s %s\n' "$dirty" "$s" "$live" "$path"
+    printf '%-3s %-28s %-8s %-8s %s\n' "$dirty" "$s" "$live" "$agent" "$path"
   done
 }
 
+cmd_status() {
+  local s all query
+  if [ $# -gt 0 ]; then
+    query=$1
+    all=$(known_sessions)
+    case $'\n'"$all"$'\n' in
+      *$'\n'"$query"$'\n'*) s=$query;;
+      *) s=$(printf '%s\n' "$all" | grep -i -- "$query" | head -1) || true;;
+    esac
+    [ -n "$s" ] || die "no tree matching: $query"
+  elif [ -n "${TMUX:-}" ]; then
+    s=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S')
+    all=$(known_sessions)
+    case $'\n'"$all"$'\n' in
+      *$'\n'"$s"$'\n'*) ;;
+      *) die "$s is not a supertree session";;
+    esac
+  else
+    die "usage: st status <tree>  (omit tree inside tmux)"
+  fi
+  printf '%s\t%s\n' "$s" "$(agent_status "$s")"
+}
+
 cmd_rm() {
-  local branch="" force=0
+  local branch="" force=0 repo_arg=""
   while [ $# -gt 0 ]; do
     case $1 in
       --force|-f) force=1; shift;;
+      --repo) repo_arg=$2; shift 2;;
       *) branch=$1; shift;;
     esac
   done
   [ -n "$branch" ] || die "usage: st rm <branch> [--force]"
 
   local main repo slug dir sess dirty unpushed
-  main=$(require_repo .)
+  main=$(require_repo "${repo_arg:-.}")
   repo=$(basename "$main")
   slug=$(slugify "$branch")
   dir=$(tree_dir "$repo" "$slug")
   sess=$(sess_name "$repo" "$slug")
   [ -d "$dir" ] || die "no worktree for $branch at $dir"
+  [ "$dir" != "$main" ] || die "cannot remove the main worktree"
 
   dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
   if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
@@ -427,12 +588,29 @@ cmd_rm() {
     "$ST_STATE/seen/$repo/$slug.claude" \
     "$ST_STATE/seen/$repo/$slug.codex" \
     "$ST_STATE/seen/$repo/$slug.openrouter"
+  if [ -f "$ST_STATE/recent" ]; then
+    local tmp
+    tmp=$(mktemp "$ST_STATE/.recent.XXXXXX")
+    grep -vxF -- "$sess" "$ST_STATE/recent" > "$tmp" || true
+    mv "$tmp" "$ST_STATE/recent"
+  fi
   info "removed $sess"
 }
 
 # session names of every known tree (guard: never touch non-st sessions)
 known_sessions() {
   list_trees | while IFS=$'\t' read -r repo branch path; do
+    sess_name "$repo" "$(slugify "$branch")"; printf '\n'
+  done
+}
+
+# A subtree is a linked worktree; keep each repository's main session open so
+# clients have somewhere to land after the linked sessions are closed.
+subtree_sessions() {
+  local repo branch path main
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    main=$(main_worktree "$path")
+    [ "$path" != "$main" ] || continue
     sess_name "$repo" "$(slugify "$branch")"; printf '\n'
   done
 }
@@ -445,26 +623,53 @@ live_sessions() {
   done
 }
 
+live_subtree_sessions() {
+  local s
+  subtree_sessions | while read -r s; do
+    [ -n "$s" ] || continue
+    tmux has-session -t "=$s" 2>/dev/null && printf '%s\n' "$s"
+  done
+}
+
+ensure_main_fallbacks() {
+  local repo branch path main main_branch main_sess subtree
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    main=$(main_worktree "$path")
+    [ "$path" != "$main" ] || continue
+    subtree=$(sess_name "$repo" "$(slugify "$branch")")
+    tmux has-session -t "=$subtree" 2>/dev/null || continue
+    main_branch=$(git -C "$main" branch --show-current)
+    [ -n "$main_branch" ] || main_branch='(detached)'
+    main_sess=$(sess_name "$repo" "$(slugify "$main_branch")")
+    if ! tmux has-session -t "=$main_sess" 2>/dev/null; then
+      tmux new-session -d -s "$main_sess" -c "$main" -n shell
+    fi
+  done
+}
+
 cmd_down() {
   local yes=0 target="" s live
   while [ $# -gt 0 ]; do
     case $1 in
       -y|--yes) yes=1; shift;;
       --all) target=--all; shift;;
+      --subtrees) target=--subtrees; shift;;
       *) target=$1; shift;;
     esac
   done
 
-  if [ "$target" = --all ]; then
-    live=$(live_sessions)
-    [ -n "$live" ] || { info "no tree sessions open"; return 0; }
+  if [ "$target" = --all ] || [ "$target" = --subtrees ]; then
+    if [ "$target" = --all ]; then live=$(live_sessions)
+    else live=$(live_subtree_sessions); fi
+    [ -n "$live" ] || { info "no matching tree sessions open"; return 0; }
     printf 'will close:\n%s\n' "$live" >&2
     if [ "$yes" = 0 ]; then
       printf 'unsaved editor buffers are lost. proceed? [y/N] ' >&2; read -r ans
       case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
     fi
+    [ "$target" != --subtrees ] || ensure_main_fallbacks
     printf '%s\n' "$live" | while read -r s; do evacuate_clients "$s"; tmux kill-session -t "=$s"; done
-    info "closed all tree sessions (worktrees kept)"
+    info "closed selected tree sessions (worktrees kept)"
     return 0
   fi
 
@@ -558,6 +763,7 @@ cmd_harness() {
   marker="$ST_STATE/seen/$repo/$slug.$ST_HARNESS"
   legacy="$ST_STATE/seen/$repo/$slug"
   mkdir -p "$(dirname "$marker")"
+  set_agent_status running
   if [ -f "$marker" ] || { [ "$ST_HARNESS" = claude ] && [ -f "$legacy" ]; }; then
     case $ST_HARNESS in
       claude) claude --continue || claude;;
@@ -578,6 +784,7 @@ cmd_harness() {
       *) eval "$ST_HARNESS_COMMAND";;
     esac
   fi
+  set_agent_status done
 }
 
 cmd_doctor() {
@@ -666,8 +873,9 @@ st — supertree: worktree + tmux + coding-agent harness
   st new <branch> [--from <base>] [--bare]   create worktree, bootstrap, open session
   st go [query]                              pick a tree (fzf) and switch to it
   st resume [query]                          same as go — reopens a closed tree, agent continues
-  st down [branch|--all]                     close the tree's session, keep the worktree
+  st down [branch|--subtrees|--all]          close tree sessions, keep worktrees
   st ls                                      list worktrees, session state, dirtiness
+  st status [tree]                           check agent: running, input, done, closed
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
   st update                                  install the latest st release, if newer
   st doctor                                  check the install and configured windows
@@ -675,7 +883,7 @@ st — supertree: worktree + tmux + coding-agent harness
 keys (inside tmux)
   M-w   tree picker          M-e   toggle first <-> second configured window
   M-1 / M-2 / M-3           select configured window by position
-  M-q   close this tree (session only)
+  M-q   close this tree       M-Q   close all linked tree sessions
 USAGE
 }
 
@@ -685,6 +893,7 @@ case ${1:-} in
   resume) shift; cmd_go "$@";;
   down)   shift; cmd_down "$@";;
   ls)     shift; cmd_ls "$@";;
+  status) shift; cmd_status "$@";;
   rm)     shift; cmd_rm "$@";;
   toggle) shift; cmd_toggle "$@";;
   window) shift; cmd_window "$@";;

@@ -95,7 +95,9 @@ st rm feat-otp         # done with it: session, worktree and branch go away
 | `st resume [query]` | Same as `go`. Named for the case where you closed a tree earlier and want it back. |
 | `st down [branch]` | Close a tree's tmux session. Worktree, branch and agent history stay. No branch = the tree you are in. |
 | `st down --all` | Close every tree session. Lists them and asks first. |
-| `st ls` | Every worktree of every known repo: session live or not, `*` if the tree is dirty, path. |
+| `st down --subtrees` | Close linked worktree sessions and keep main sessions open. Lists them and asks first. |
+| `st ls` | Every known worktree: session state, agent state, dirtiness, and path. |
+| `st status [tree]` | Check one agent: `running`, `input`, `done`, or `closed`. Omit the tree name inside its tmux session. |
 | `st rm <branch>` | Destructive: kills the session, removes the worktree, deletes the branch if merged. |
 | `st update` | Check for the latest release and install it automatically when available. |
 | `st doctor` | Check dependencies, `PATH`, the symlink, the `~/.tmux.conf` line. |
@@ -111,7 +113,7 @@ st down --all -y                 skip the confirmation
 
 ### Internal
 
-`st window`, `st agent`, `st toggle`, `st go --picker`, `st _run`, `st _agent`,
+`st window`, `st agent`, `st toggle`, `st go --picker`, `st go --popup`, `st _run`, `st _agent`,
 `st _sessions` are called by the tmux bindings, not by hand.
 
 ---
@@ -122,14 +124,23 @@ st down --all -y                 skip the confirmation
 
 | key | does |
 |---|---|
-| `M-w` | tree picker (fzf popup), including a `+ new branch…` row |
+| `M-w` | tree picker, ordered by most recently opened tree, with a `+ new branch…` row |
 | `M-e` | toggle between the first two configured windows |
 | `M-1` / `M-2` / `M-3` | select a configured window by position |
 | `M-q` | close this tree, asks first (worktree kept) |
+| `M-Q` (Option-Shift-Q) | close all linked worktree sessions, asks first (worktrees kept) |
+
+In the tree picker, press Enter to open a tree, Ctrl-D to delete the selected
+worktree, or Escape to close the picker.
 
 Prefix stays `C-a`. `M-arrow` pane movement and `S-Enter` are untouched.
 `status-left` shows the current session name, so the tree you are typing into is
 always on screen.
+
+Agent state appears in `st ls` and the `M-w` picker. `running` means the agent
+process is active, `input` means its pane shows a prompt, `done` means the agent
+exited, and `closed` means the tree session is not open. Prompt detection is a
+best effort check of the pane; custom agents may need their own prompt pattern.
 
 ---
 
@@ -255,15 +266,16 @@ configured agent window if it has been closed.
 **Close the tree** — `M-q` or `st down`. Kills only the tmux session. Unsaved
 editor buffers in that session are lost.
 
-Closing never detaches you from tmux. tmux's `detach-on-destroy` is `on` by
-default, so killing the session your client sits in would normally drop you to
-the shell. `st` moves every attached client off the session first — back to the
-session you came from when `st` switched you there (remembered per client tty
-under `~/.local/state/supertree/origin/`), otherwise to the most recently used
-other session. Same for `st rm` and `st down --all`. Your own
-`detach-on-destroy` setting is left alone.
+For `M-q`, `M-Q`, and `st rm`, `st` moves attached clients off a session before
+closing it — back to the session they came from when possible (remembered per
+client tty under `~/.local/state/supertree/origin/`), otherwise to a remaining
+session. `st down --all` can detach clients when it closes the last tmux
+session. Your `detach-on-destroy` setting is left alone.
 
-**Close everything** — `st down --all`, which lists the sessions and asks.
+**Close subtrees** — `M-Q` or `st down --subtrees` closes every linked worktree
+session and leaves each repository's main session open. If a main session is
+closed, `st` opens a shell there before closing its linked trees so tmux can
+keep the client attached. `st down --all` closes the main sessions too.
 
 **Come back** — `st resume [branch]` or `M-w`. The session is rebuilt and the
 configured agent resumes that worktree's own conversation. The first launch for
@@ -273,7 +285,9 @@ this survives a hard `kill-session`, not just a clean exit.
 
 **Delete the tree** — `st rm <branch>`. Refuses while there are uncommitted
 changes or unpushed commits unless you pass `--force`, prints what it will
-remove, and asks. The branch is deleted only if it is merged.
+remove, and asks. The branch is deleted only if it is merged. In the `M-w`
+picker, highlight a tree and press Ctrl-D to run the same guarded removal.
+The main worktree cannot be deleted from the picker.
 
 ---
 
