@@ -92,6 +92,7 @@ st rm feat-otp         # done with it: session, worktree and branch go away
 | command | what it does |
 |---|---|
 | `st new <branch>` | Create the worktree, bootstrap it, build the tmux session, switch to it. Reuses the branch if it already exists, otherwise creates it. |
+| `st trust` | Trust the current contents of this repository's reviewed `.supertree` file. Run again if the file changes. |
 | `st go [query]` | Switch to a tree. No query opens an fzf picker; a query picks the first match. Builds the session first if the tree is closed. |
 | `st resume [query]` | Same as `go`. Named for the case where you closed a tree earlier and want it back. |
 | `st down [branch]` | Close a tree's tmux session. Worktree, branch and agent history stay. No branch = the tree you are in. |
@@ -149,13 +150,17 @@ best effort check of the pane; custom agents may need their own prompt pattern.
 
 ```
 ~/projects/webauth                        main checkout
-~/projects/.worktrees/webauth/feat-otp    worktree for feat-otp
-tmux session "webauth/feat-otp"           windows: codex, vim, shell
+~/projects/.worktrees/webauth-<repo-id>/feat-otp-<branch-id>  worktree
+tmux session "webauth-<repo-id>/feat-otp-<branch-id>"          windows: codex, vim, shell
 ```
 
-Session names are `<repo>/<branch>`, with `.` and `:` replaced by `-` (tmux
-forbids them). Windows are addressed by **name**, not index, so your
-`base-index` setting is irrelevant.
+The IDs are stable hashes of the main checkout path and the exact branch name.
+They keep branches such as `feat/a-b` and `feat-a-b`, and repositories with the
+same directory name, separate. Existing worktrees made with the old path layout
+are reused when Git confirms the exact repository and branch. New sessions use
+the new names, while the tmux status bar shows the readable `<repo>/<branch>`
+label. Close any old sessions before upgrading. Windows are addressed
+by **name**, not index, so your `base-index` setting is irrelevant.
 
 Each program window drops to an interactive shell in the same worktree when its
 program exits. Window order and selection are configurable.
@@ -239,7 +244,19 @@ Build output (`.next`, `dist`) is never shared between trees.
 
 ### Per-repo config
 
-Optional `.supertree` at the repo root, sourced by `st new`:
+Optional `.supertree` at the repo root, sourced by `st new` after you trust its
+current contents:
+
+```sh
+cat .supertree    # review the commands it contains
+st trust          # records this version for the repository
+st new feat-otp
+```
+
+If `.supertree` changes, `st new` stops before creating a worktree until you
+review it and run `st trust` again. `st new --bare` does not execute it.
+
+Example `.supertree`:
 
 ```sh
 ST_LINK_DIRS=(node_modules)      # symlinked from main when the lockfile matches
@@ -253,8 +270,8 @@ The hook gets `ST_TREE_DIR`, `ST_TREE_BRANCH` and `ST_TREE_INDEX`.
 `ST_TREE_INDEX` is a stable small integer per tree — derive a dev server port
 from it so two trees can run at once.
 
-The file is sourced as a shell script, so it runs as you. Fine for your own
-repos; do not point `st` at a checkout you do not trust.
+The file is sourced as a shell script, so it runs as you. Only trust its contents
+after reviewing them. Global user config remains sourced on every invocation.
 
 ---
 
@@ -300,10 +317,11 @@ The main worktree cannot be deleted from the picker.
 
 | path | holds |
 |---|---|
-| `~/projects/.worktrees/<repo>/<slug>` | the worktrees |
+| `~/projects/.worktrees/<repo-id>/<branch-id>` | new worktrees (old paths remain usable) |
 | `~/.local/state/supertree/repos` | repos `st` knows about (appended by `st new`) |
-| `~/.local/state/supertree/idx/<repo>/<slug>` | that tree's `ST_TREE_INDEX` |
-| `~/.local/state/supertree/seen/<repo>/<slug>.<harness>` | marker meaning that agent has run here, drives continuation |
+| `~/.local/state/supertree/idx/<repo-id>/<branch-id>` | that tree's `ST_TREE_INDEX` |
+| `~/.local/state/supertree/seen/<repo-id>/<branch-id>.<harness>` | marker meaning that agent has run here, drives continuation |
+| `~/.local/state/supertree/trust/<repo-id>` | hash of the reviewed `.supertree` contents |
 | `~/.local/state/supertree/origin/<tty>` | which session a client came from, so closing a tree returns it there |
 
 A repo only shows up in `st go` / `st ls` after its first `st new`. Override the

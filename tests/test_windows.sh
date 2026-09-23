@@ -46,6 +46,9 @@ chmod +x "$HOME/.local/bin/tmux"
 
 main=$(git -C "$ROOT" worktree list --porcelain | awk 'NR==1 { print substr($0, 10) }')
 printf '%s\n' "$main" > "$ST_STATE/repos"
+main_session=$("$ROOT/bin/st" _sessions | grep '/main-' | head -1)
+[ -n "$main_session" ] || fail 'main session was not listed'
+export ST_TEST_SESSION="$main_session"
 
 run_layout() {
   local windows=${1:-__default__}
@@ -63,7 +66,7 @@ run_layout
 assert_log_contains '-n codex'
 assert_log_contains '-n vim'
 assert_log_contains '-n shell'
-assert_log_contains 'select-window -t =supertree/main:codex'
+assert_log_contains "select-window -t =$main_session:codex"
 
 # External-editor users can omit vim entirely.
 run_layout 'agent shell'
@@ -77,17 +80,17 @@ assert_log_excludes '-n vim'
 run_layout 'shell agent'
 first_create=$(grep -E '^(new-session|new-window) ' "$ST_TMUX_LOG" | head -1)
 case $first_create in *'-n shell'*) ;; *) fail 'shell was not the first created window';; esac
-assert_log_contains 'select-window -t =supertree/main:shell'
+assert_log_contains "select-window -t =$main_session:shell"
 
 # Numbered selection and toggle use configured positions.
 printf 'ST_HARNESS=codex\nST_WINDOWS=%q\n' 'agent shell' > "$ST_CONFIG"
 : > "$ST_TMUX_LOG"
 "$ROOT/bin/st" window 2
-assert_log_contains 'select-window -t =supertree/main:shell'
+assert_log_contains "select-window -t =$main_session:shell"
 
 : > "$ST_TMUX_LOG"
 ST_TEST_CURRENT_WINDOW=codex "$ROOT/bin/st" toggle
-assert_log_contains 'select-window -t =supertree/main:shell'
+assert_log_contains "select-window -t =$main_session:shell"
 
 # Disabled tools are not reported as dependencies.
 printf 'ST_HARNESS=codex\nST_WINDOWS=shell\n' > "$ST_CONFIG"
