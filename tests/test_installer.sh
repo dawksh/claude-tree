@@ -36,7 +36,7 @@ printf '%s\n' \
   'done' \
   'case $url in' \
   '  */releases/latest) printf "%s/releases/tag/%s" "$ST_RELEASE_ROOT" "$ST_TEST_LATEST";;' \
-  '  */st) cp "$ST_TEST_SOURCE/bin/st" "$output";;' \
+  '  */st.tar.gz) tar -czf "$output" -C "$ST_TEST_SOURCE/bin" st st-lib;;' \
   '  */supertree.conf) cp "$ST_TEST_SOURCE/tmux/supertree.conf" "$output";;' \
   '  *) exit 1;;' \
   'esac' > "$HOME/.local/bin/curl"
@@ -46,6 +46,9 @@ export ST_RELEASE_ROOT=https://example.invalid/supertree
 output=$("$ROOT/install.sh")
 
 [ -x "$ST_PREFIX/st" ] || { printf 'FAIL: st was not installed\n' >&2; exit 1; }
+[ -f "$ST_PREFIX/st-lib-$ST_TEST_LATEST/00-core.sh" ] || {
+  printf 'FAIL: st modules were not installed\n' >&2; exit 1
+}
 grep -F "supertree $ST_TEST_LATEST" <<<"$output" >/dev/null || {
   printf 'FAIL: installer did not show the resolved version\n' >&2
   exit 1
@@ -88,6 +91,10 @@ fi
 }
 [ ! -e "$ST_PREFIX/st.install" ] || {
   printf 'FAIL: uninstall left install metadata\n' >&2
+  exit 1
+}
+[ ! -e "$ST_PREFIX/st-lib-$ST_TEST_LATEST" ] || {
+  printf 'FAIL: uninstall left installed modules\n' >&2
   exit 1
 }
 [ ! -e "$ST_CONFDIR/config" ] && [ ! -e "$ST_CONFDIR/supertree.conf" ] || {

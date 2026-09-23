@@ -29,7 +29,8 @@ or OpenRouter via OpenCode. It writes the choice and default window layout to
 and offers to install anything missing. Nothing is installed without a yes; if
 there is no terminal to answer on, it skips and carries on.
 
-Then it installs `st` to `~/.local/bin`, the tmux fragment to
+Then it installs `st` and its versioned `st-lib-*` module directory to
+`~/.local/bin`, the tmux fragment to
 `~/.config/supertree/`, and adds one `source-file` line to `~/.tmux.conf`
 (backing it up first).
 
@@ -57,11 +58,41 @@ tmux source-file ~/.tmux.conf      # or prefix + r
 Needs `tmux`, `git`, `fzf`, the programs used by the configured windows, and
 `~/.local/bin` on `PATH`. `st doctor` checks the active layout.
 
+### Modules
+
+`bin/st` loads `bin/st-lib/*.sh` in filename order and dispatches commands
+registered by those modules. A source-install symlink resolves back to the
+repository, so the modules stay beside `bin/st`. Release installs put modules
+in `st-lib-<version>` beside the installed command.
+
+The numbered modules make the boundaries explicit:
+
+| Module | Responsibility |
+| --- | --- |
+| `00-core` through `50-tmux` | Shared helpers for identity, repository state, bootstrap, agent, and tmux |
+| `60-picker` | Tree picker and `go`/`resume` |
+| `70-worktrees` | Worktree creation, trust, listing, status, and removal |
+| `90-maintenance` | `doctor`, `update`, and `version` |
+
+To add a command, put a shell file such as `bin/st-lib/85-greeting.sh` in the
+module directory:
+
+```bash
+cmd_greet() { printf 'hello %s\n' "${1:-world}"; }
+st_register_command greet cmd_greet 'greet someone'
+```
+
+The command appears in `st help` automatically. Remove that file to remove
+the command. The picker, worktree, and maintenance modules can also be removed
+individually; the shared modules provide the functions used across features.
+Run the shell tests after changing modules.
+
 ### Releases
 
 Pull requests to `main` run the shell test suite on Ubuntu and macOS. A merge
 to `main` triggers the release workflow, which tests the merged commit and
-publishes `install.sh`, `st`, `supertree.conf`, and `SHA256SUMS` as a GitHub
+publishes `install.sh`, `st.tar.gz`, a legacy upgrade entrypoint named `st`,
+`supertree.conf`, and `SHA256SUMS` as a GitHub
 Release. `st update` then sees the new release automatically.
 
 Each merged pull request gets a patch version by default. Add the
@@ -87,9 +118,12 @@ st update
 ```
 
 `st update` checks GitHub for the latest release and installs it immediately when
-a newer version is available. The download is validated and staged before the
-current executable is replaced, so a failed update leaves the existing install
-untouched. Run `st --version` to see the installed version.
+a newer version is available. The archive and modules are validated and staged
+before the current executable is replaced. The previous version's modules remain
+available if an update fails. Run `st --version` to see the installed version.
+
+Older single-file installations migrate on the first command after `st update`.
+The compatibility entrypoint installs the module bundle and then runs that command.
 
 Source installs made with the symlink instructions above are not overwritten;
 update those with `git pull` instead.
@@ -345,7 +379,7 @@ Uncommitted or unpushed work in linked trees also needs `--force`. The command
 prints every target and asks once; unrelated files under the root are left alone.
 
 **Uninstall** — `st uninstall` asks before removing the installed `st` command,
-Supertree config and state, and the matching source line from `~/.tmux.conf`.
+its installed modules, Supertree config and state, and the matching source line from `~/.tmux.conf`.
 It closes known Supertree sessions. Worktrees and coding-agent installs remain;
 run `st remove all` first if you want the worktrees removed. The installer
 records custom config locations for uninstall. A source install removes only
