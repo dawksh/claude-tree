@@ -356,6 +356,9 @@ mv "$tmpdir/stamped" "$tmpdir/st"
 
 mkdir -p "$PREFIX" "$CONFDIR"
 install -m 0755 "$tmpdir/st" "$PREFIX/st"
+# Keep custom install paths beside the command so `st uninstall` can find them
+# even when the install-time environment is no longer set.
+printf '%s\n%s\n' "$CONFDIR" "$TMUX_CONF" > "$PREFIX/st.install"
 row "command" "${GRN}✔${R}" "$PREFIX/st"
 
 sed "s|~/.local/bin/st|$PREFIX/st|g" "$tmpdir/supertree.conf" > "$CONFDIR/supertree.conf"

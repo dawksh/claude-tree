@@ -124,7 +124,9 @@ st rm feat-otp         # done with it: session, worktree and branch go away
 | `st ls` | Every known worktree: session state, agent state, dirtiness, and path. |
 | `st status [tree]` | Check one agent: `running`, `input`, `done`, or `closed`. Omit the tree name inside its tmux session. |
 | `st rm <branch>` | Destructive: kills the session, removes the worktree, deletes the branch if merged. |
+| `st remove all [--force]` | List and remove Git checkouts under `ST_WORKTREE_ROOT`, including standalone repositories. Asks before removal. |
 | `st update` | Check for the latest release and install it automatically when available. |
+| `st uninstall` | Remove the installed command, Supertree config, tmux source line, and state. |
 | `st doctor` | Check dependencies, `PATH`, the symlink, the `~/.tmux.conf` line. |
 
 ### Flags
@@ -133,6 +135,7 @@ st rm feat-otp         # done with it: session, worktree and branch go away
 st new <branch> --from <base>    branch off <base> instead of current HEAD
 st new <branch> --bare           skip deps, env and the agent; just print the worktree path
 st rm <branch> --force           remove even with uncommitted or unpushed work
+st remove all --force            also remove standalone repositories and their history
 st down --all -y                 skip the confirmation
 ```
 
@@ -333,6 +336,20 @@ changes or unpushed commits unless you pass `--force`, prints what it will
 remove, and asks. The branch is deleted only if it is merged. In the `M-w`
 picker, highlight a tree and press Ctrl-D to run the same guarded removal.
 The main worktree cannot be deleted from the picker.
+
+**Clear the worktree root** — `st remove all` inventories Git checkouts at the
+root and one directory below it. It removes linked worktrees through Git and
+leaves their branches when they are not merged. Standalone repositories need
+`--force` because their Git history lives in the directory being deleted.
+Uncommitted or unpushed work in linked trees also needs `--force`. The command
+prints every target and asks once; unrelated files under the root are left alone.
+
+**Uninstall** — `st uninstall` asks before removing the installed `st` command,
+Supertree config and state, and the matching source line from `~/.tmux.conf`.
+It closes known Supertree sessions. Worktrees and coding-agent installs remain;
+run `st remove all` first if you want the worktrees removed. The installer
+records custom config locations for uninstall. A source install removes only
+the `st` symlink, not the checkout.
 
 ---
 

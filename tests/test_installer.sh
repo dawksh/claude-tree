@@ -80,4 +80,19 @@ if grep -Eq '^[[:space:]]+.[[:space:]]+nvim[[:space:]]' <<<"$output"; then
   exit 1
 fi
 
-printf 'ok: installer harness selection, window config, and dependencies\n'
+( unset ST_CONFDIR ST_CONFIG TMUX_CONF
+  printf 'y\n' | "$ST_PREFIX/st" uninstall ) > "$TEST_ROOT/uninstall.out" 2>&1
+[ ! -e "$ST_PREFIX/st" ] || {
+  printf 'FAIL: uninstall left the installed command\n' >&2
+  exit 1
+}
+[ ! -e "$ST_PREFIX/st.install" ] || {
+  printf 'FAIL: uninstall left install metadata\n' >&2
+  exit 1
+}
+[ ! -e "$ST_CONFDIR/config" ] && [ ! -e "$ST_CONFDIR/supertree.conf" ] || {
+  printf 'FAIL: uninstall left installed config\n' >&2
+  exit 1
+}
+
+printf 'ok: installer harness selection, window config, dependencies, and uninstall\n'
