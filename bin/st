@@ -10,7 +10,8 @@ PATH="$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:$PATH"
 ST_WORKTREE_ROOT="${ST_WORKTREE_ROOT:-$HOME/projects/.worktrees}"
 ST_STATE="${ST_STATE:-$HOME/.local/state/supertree}"
 ST_REPOS="$ST_STATE/repos"
-ST_CONFIG="${ST_CONFIG:-$HOME/.config/supertree/config}"
+_env_config=${ST_CONFIG:-}
+ST_CONFIG="${ST_CONFIG:-${ST_CONFDIR:-$HOME/.config/supertree}/config}"
 
 # Config is shell syntax, like .supertree. Environment variables win so a
 # one-off `ST_HARNESS=codex st new ...` does what it says.
@@ -695,6 +696,12 @@ cmd_rm() {
   if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
   else git -C "$main" worktree remove "$dir"; fi
   git -C "$main" branch -d "$branch" 2>/dev/null || info "branch $branch kept (not merged)"
+  clear_tree_state "$repo" "$slug" "$sess"
+  info "removed $sess"
+}
+
+clear_tree_state() {
+  local repo=$1 slug=$2 sess=$3 tmp
   rm -f "$ST_STATE/idx/$repo/$slug" \
     "$ST_STATE/seen/$repo/$slug" \
     "$ST_STATE/seen/$repo/$slug.$ST_HARNESS" \
@@ -702,12 +709,137 @@ cmd_rm() {
     "$ST_STATE/seen/$repo/$slug.codex" \
     "$ST_STATE/seen/$repo/$slug.openrouter"
   if [ -f "$ST_STATE/recent" ]; then
-    local tmp
     tmp=$(mktemp "$ST_STATE/.recent.XXXXXX")
     grep -vxF -- "$sess" "$ST_STATE/recent" > "$tmp" || true
     mv "$tmp" "$ST_STATE/recent"
   fi
-  info "removed $sess"
+}
+
+# Remove every Git checkout directly under the configured root or one repo
+# directory below it. A checkout with its own .git directory is a standalone
+# repository, so Git cannot remove it with `worktree remove`.
+cmd_remove_all() {
+  local force=0 root dir main branch sess repo slug dirty unpushed current other found tmp j
+  local current_sess='' close_current=0
+  local -a dirs=() mains=() branches=() sessions=() kinds=()
+  case ${1:-} in --force|-f) force=1; shift;; esac
+  [ $# -eq 0 ] || die "usage: st remove all [--force]"
+  [ -d "$ST_WORKTREE_ROOT" ] || { info "no worktrees under $ST_WORKTREE_ROOT"; return 0; }
+  root=$(cd "$ST_WORKTREE_ROOT" && pwd -P)
+  [ "$root" != / ] && [ "$root" != "$HOME" ] || die "unsafe worktree root: $root"
+
+  for dir in "$root"/* "$root"/*/*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "$dir/.git" ] &&
+      { [ -f "$dir/.git" ] || [ -d "$dir/.git" ]; } || continue
+    [ "$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)" = "$dir" ] || continue
+    main=$(main_worktree "$dir")
+    [ -n "$main" ] || continue
+    branch=$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    if [ "$main" = "$dir" ]; then
+      # Do not list a nested checkout twice when its parent is a repository.
+      case $dir in "$root"/*/*)
+        [ -e "$(dirname "$dir")/.git" ] && continue;;
+      esac
+      sess=''
+      if [ -n "$branch" ] && grep -qxF "$dir" "$ST_REPOS" 2>/dev/null; then
+        sess=$(sess_name "$(repo_key "$dir")" "$(branch_key "$branch")")
+      fi
+      dirs+=("$dir"); mains+=("$main"); branches+=("$branch")
+      sessions+=("$sess"); kinds+=(repo)
+    else
+      if [ -n "$branch" ]; then
+        [ "$(branch_worktree "$main" "$branch" || true)" = "$dir" ] ||
+          die "worktree changed while listing: $dir"
+      fi
+      repo=$(repo_key "$main")
+      slug=$(branch_key "${branch:-(detached)}")
+      sess=$(sess_name "$repo" "$slug")
+      dirs+=("$dir"); mains+=("$main"); branches+=("$branch")
+      sessions+=("$sess"); kinds+=(worktree)
+    fi
+  done
+  [ ${#dirs[@]} -gt 0 ] || { info "no Git checkouts under $root"; return 0; }
+
+  printf 'will remove from %s:\n' "$root" >&2
+  local i
+  for ((i=0; i<${#dirs[@]}; i++)); do
+    printf '  %-10s %s\n' "${kinds[i]}" "${dirs[i]}" >&2
+  done
+  for ((i=0; i<${#dirs[@]}; i++)); do
+    dir=${dirs[i]}
+    if [ "${kinds[i]}" = repo ] && [ "$force" = 0 ]; then
+      die "standalone repositories require --force (their history would be deleted)"
+    fi
+    if [ "${kinds[i]}" = repo ]; then
+      while IFS= read -r other; do
+        [ "$other" = "$dir" ] && continue
+        found=0
+        for ((j=0; j<${#dirs[@]}; j++)); do
+          [ "${dirs[j]}" = "$other" ] && [ "${kinds[j]}" = worktree ] && found=1
+        done
+        [ "$found" = 1 ] || die "refusing to delete $dir; linked worktree outside removal list: $other"
+      done < <(git -C "$dir" worktree list --porcelain | sed -n 's/^worktree //p')
+    fi
+    dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
+    unpushed=''
+    if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+      unpushed=$(git -C "$dir" log --oneline '@{u}..' 2>/dev/null || true)
+    elif [ -n "$(git -C "$dir" remote)" ]; then
+      unpushed=$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null || true)
+    fi
+    if [ "$force" = 0 ] && [ -n "$dirty$unpushed" ]; then
+      die "refusing to remove $dir with uncommitted or unpushed work; pass --force"
+    fi
+  done
+  printf 'proceed? [y/N] ' >&2; read -r ans
+  case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
+  if [ -n "${TMUX:-}" ]; then
+    current_sess=$(tmux display-message -p '#S' 2>/dev/null || true)
+  fi
+
+  # Linked worktrees must go first when a standalone repo under the root owns
+  # one of them. Revalidate each candidate before touching it.
+  local kind
+  for kind in worktree repo; do
+    for ((i=0; i<${#dirs[@]}; i++)); do
+      [ "${kinds[i]}" = "$kind" ] || continue
+      dir=${dirs[i]}; main=${mains[i]}; branch=${branches[i]}; sess=${sessions[i]}
+      [ -d "$dir" ] && [ ! -L "$dir" ] &&
+        [ "$(main_worktree "$dir")" = "$main" ] ||
+        die "checkout changed; refusing to remove $dir"
+      if [ "$kind" = worktree ]; then
+        repo=$(repo_key "$main")
+        if [ -n "$branch" ]; then
+          current=$(branch_worktree "$main" "$branch" || true)
+          [ "$current" = "$dir" ] || die "worktree changed; refusing to remove $dir"
+        fi
+        evacuate_clients "$sess"
+        if [ "$sess" = "$current_sess" ]; then close_current=1
+        else tmux kill-session -t "=$sess" 2>/dev/null || true; fi
+        if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
+        else git -C "$main" worktree remove "$dir"; fi
+        [ -z "$branch" ] || git -C "$main" branch -d "$branch" 2>/dev/null ||
+          info "branch $branch kept (not merged)"
+        clear_tree_state "$repo" "$(branch_key "${branch:-(detached)}")" "$sess"
+      else
+        if [ -n "$sess" ]; then
+          evacuate_clients "$sess"
+          if [ "$sess" = "$current_sess" ]; then close_current=1
+          else tmux kill-session -t "=$sess" 2>/dev/null || true; fi
+        fi
+        rm -rf -- "$dir"
+        if [ -f "$ST_REPOS" ]; then
+          tmp=$(mktemp "$ST_STATE/.repos.XXXXXX")
+          grep -vxF -- "$dir" "$ST_REPOS" > "$tmp" || true
+          mv "$tmp" "$ST_REPOS"
+        fi
+      fi
+      info "removed $dir"
+    done
+  done
+  if [ "$close_current" = 1 ]; then
+    tmux kill-session -t "=$current_sess" 2>/dev/null || true
+  fi
 }
 
 # session names of every known tree (guard: never touch non-st sessions)
@@ -946,6 +1078,91 @@ st_executable() {
   esac
 }
 
+cmd_uninstall() {
+  [ $# -eq 0 ] || die "usage: st uninstall"
+  local self confdir tmux_conf fragment config staged sessions sess manifest key binding
+  local had_fragment=0 current_sess='' close_current=0
+  self=$(st_executable)
+  [ -L "$self" ] || [ "$ST_VERSION" != dev ] ||
+    die "run the installed st command, not the development source file"
+  [ "$(basename "$self")" = st ] || die "unexpected executable path: $self"
+  manifest="$self.install"
+  confdir=${ST_CONFDIR:-}
+  tmux_conf=${TMUX_CONF:-}
+  if [ -f "$manifest" ]; then
+    [ -n "$confdir" ] || confdir=$(sed -n '1p' "$manifest")
+    [ -n "$tmux_conf" ] || tmux_conf=$(sed -n '2p' "$manifest")
+  fi
+  confdir=${confdir:-$HOME/.config/supertree}
+  tmux_conf=${tmux_conf:-$HOME/.tmux.conf}
+  fragment="$confdir/supertree.conf"
+  [ ! -f "$fragment" ] || had_fragment=1
+  config=${_env_config:-$confdir/config}
+  if [ -d "$ST_STATE" ]; then
+    local state_real
+    state_real=$(cd "$ST_STATE" && pwd -P)
+    [ "$state_real" != / ] && [ "$state_real" != "$HOME" ] ||
+      die "unsafe state directory: $ST_STATE"
+  fi
+  printf 'will uninstall:\n  command  %s\n  bindings %s\n  config   %s\n  state    %s\n' \
+    "$self" "$fragment" "$config" "$ST_STATE" >&2
+  [ -f "$tmux_conf" ] && printf '  tmux     %s (Supertree source line)\n' "$tmux_conf" >&2
+  printf 'proceed? [y/N] ' >&2; read -r ans
+  case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
+
+  sessions=$(known_sessions)
+  if [ -n "${TMUX:-}" ]; then
+    current_sess=$(tmux display-message -p '#S' 2>/dev/null || true)
+  fi
+  while IFS= read -r sess; do
+    [ -n "$sess" ] || continue
+    evacuate_clients "$sess"
+    if [ "$sess" = "$current_sess" ]; then close_current=1; continue; fi
+    tmux kill-session -t "=$sess" 2>/dev/null || true
+  done <<EOF
+$sessions
+EOF
+
+  if [ -f "$tmux_conf" ] && grep -qxF "source-file $fragment" "$tmux_conf"; then
+    staged=$(mktemp "${tmux_conf}.st.XXXXXX")
+    cp -p "$tmux_conf" "$staged"
+    # Remove only the line installed for this fragment and its marker.
+    awk -v target="source-file $fragment" '
+      { if ($0 == target) { if (prev != "# supertree" && have) print prev; have=0; next }
+        if (have) print prev; prev=$0; have=1 }
+      END { if (have) print prev }
+    ' "$tmux_conf" > "$staged"
+    mv "$staged" "$tmux_conf"
+  fi
+  rm -f -- "$fragment" "$config"
+  [ ! -d "$confdir" ] || rmdir "$confdir" 2>/dev/null || true
+  if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
+    for key in M-w M-e M-1 M-2 M-3; do
+      binding=$(tmux list-keys -T root "$key" 2>/dev/null || true)
+      case $binding in *"$self"*) tmux unbind-key -n "$key" 2>/dev/null || true;; esac
+    done
+    if [ "$had_fragment" = 1 ]; then
+      for key in M-q M-Q; do
+        binding=$(tmux list-keys -T root "$key" 2>/dev/null || true)
+        case $binding in *'detach-client'*) tmux unbind-key -n "$key" 2>/dev/null || true;; esac
+      done
+    fi
+    if [ "$(tmux show-options -gv status-left 2>/dev/null || true)" = \
+      ' #{?@supertree_label,#{@supertree_label},#S} ' ]; then
+      tmux set-option -gu status-left 2>/dev/null || true
+      [ "$(tmux show-options -gv status-left-length 2>/dev/null || true)" != 40 ] ||
+        tmux set-option -gu status-left-length 2>/dev/null || true
+    fi
+    [ ! -f "$tmux_conf" ] || tmux source-file "$tmux_conf" 2>/dev/null || true
+  fi
+  rm -rf -- "$ST_STATE"
+  rm -f -- "$self" "$manifest"
+  info "uninstalled st"
+  if [ "$close_current" = 1 ]; then
+    tmux kill-session -t "=$current_sess" 2>/dev/null || true
+  fi
+}
+
 cmd_update() {
   [ $# -eq 0 ] || die "usage: st update"
   command -v curl >/dev/null 2>&1 || die "curl is required to update st"
@@ -1004,7 +1221,9 @@ st — supertree: worktree + tmux + coding-agent harness
   st ls                                      list worktrees, session state, dirtiness
   st status [tree]                           check agent: running, input, done, closed
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
+  st remove all [--force]                    remove Git checkouts under worktree root
   st update                                  install the latest st release, if newer
+  st uninstall                               remove st, its config, bindings, and state
   st doctor                                  check the install and configured windows
 
 keys (inside tmux)
@@ -1023,10 +1242,12 @@ case ${1:-} in
   ls)     shift; cmd_ls "$@";;
   status) shift; cmd_status "$@";;
   rm)     shift; cmd_rm "$@";;
+  remove) shift; [ "${1:-}" = all ] || die "usage: st remove all [--force]"; shift; cmd_remove_all "$@";;
   toggle) shift; cmd_toggle "$@";;
   window) shift; cmd_window "$@";;
   agent)  shift; cmd_agent "$@";;
   update) shift; cmd_update "$@";;
+  uninstall) shift; cmd_uninstall "$@";;
   version|--version|-V) printf 'st %s\n' "$ST_VERSION";;
   doctor) shift; cmd_doctor "$@";;
   _sessions) shift; known_sessions;;
