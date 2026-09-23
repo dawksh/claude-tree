@@ -69,8 +69,12 @@ chmod +x "$HOME/.local/bin/tmux"
 printf 'ST_HARNESS=codex\n' > "$ST_CONFIG"
 tmux_state="$TEST_ROOT/tmux-state"
 mkdir -p "$tmux_state"
-main=$(git -C "$ROOT" worktree list --porcelain | awk 'NR==1 { print substr($0, 10) }')
-printf '%s\n' "$main" > "$tmux_state/repos"
+fixture="$TEST_ROOT/supertree"
+git init -q "$fixture"
+git -C "$fixture" -c user.name=Test -c user.email=test@example.com \
+  commit -q --allow-empty -m init
+git -C "$fixture" worktree add -q -b multi-agent "$TEST_ROOT/multi-agent"
+printf '%s\n' "$fixture" > "$tmux_state/repos"
 ST_STATE="$tmux_state" "$ROOT/bin/st" go multi-agent
 grep -F -- '-n codex' "$ST_TMUX_LOG" >/dev/null || fail 'session did not create a codex window'
 grep -F -- '_run _agent' "$ST_TMUX_LOG" >/dev/null || fail 'session did not use the generic agent launcher'

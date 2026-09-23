@@ -57,6 +57,29 @@ tmux source-file ~/.tmux.conf      # or prefix + r
 Needs `tmux`, `git`, `fzf`, the programs used by the configured windows, and
 `~/.local/bin` on `PATH`. `st doctor` checks the active layout.
 
+### Releases
+
+Pull requests to `main` run the shell test suite on Ubuntu and macOS. A merge
+to `main` triggers the release workflow, which tests the merged commit and
+publishes `install.sh`, `st`, `supertree.conf`, and `SHA256SUMS` as a GitHub
+Release. `st update` then sees the new release automatically.
+
+Each merged pull request gets a patch version by default. Add the
+`release:minor` or `release:major` label before merging to request a larger
+version bump. If both are present, major takes precedence. Use squash or merge
+commits, so each pull request produces one commit on the first-parent history
+of `main`.
+The release job catches up on any merges that happen while a prior release is
+running. The first automated release includes changes since the last manual
+release.
+
+In GitHub repository settings, require pull requests and the `Shell tests
+(ubuntu-latest)` and `Shell tests (macos-latest)` checks for `main`. Disable
+direct pushes and rebase merging to preserve one release per merged pull
+request. Create the optional `release:minor` and `release:major` labels in the
+repository. The release workflow uses the repository's `GITHUB_TOKEN`; no
+separate release token is needed.
+
 ### Update
 
 ```sh

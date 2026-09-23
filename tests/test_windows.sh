@@ -44,8 +44,12 @@ printf '%s\n' \
   'exit 0' > "$HOME/.local/bin/tmux"
 chmod +x "$HOME/.local/bin/tmux"
 
-main=$(git -C "$ROOT" worktree list --porcelain | awk 'NR==1 { print substr($0, 10) }')
-printf '%s\n' "$main" > "$ST_STATE/repos"
+fixture="$TEST_ROOT/supertree"
+git init -q "$fixture"
+git -C "$fixture" checkout -qb main
+git -C "$fixture" -c user.name=Test -c user.email=test@example.com \
+  commit -q --allow-empty -m init
+printf '%s\n' "$fixture" > "$ST_STATE/repos"
 main_session=$("$ROOT/bin/st" _sessions | grep '/main-' | head -1)
 [ -n "$main_session" ] || fail 'main session was not listed'
 export ST_TEST_SESSION="$main_session"
