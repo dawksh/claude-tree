@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Check shell syntax
         run: |
-          for file in bin/st install.sh tests/*.sh scripts/*.sh; do
+          for file in bin/st bin/st-lib/*.sh install.sh tests/*.sh scripts/*.sh; do
             bash -n "$file"
           done
       - name: Run tests

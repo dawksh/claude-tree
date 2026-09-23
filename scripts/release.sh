@@ -70,18 +70,20 @@ main() {
     assets="$tmp/assets"
     mkdir -p "$src" "$assets"
     git archive "$sha" | tar -x -C "$src"
-    for file in "$src/bin/st" "$src/install.sh" "$src"/tests/*.sh "$src"/scripts/*.sh; do
+    for file in "$src/bin/st" "$src"/bin/st-lib/*.sh "$src/install.sh" "$src"/tests/*.sh "$src"/scripts/*.sh; do
       bash -n "$file"
     done
     for file in "$src"/tests/*.sh; do
       bash "$file"
     done
 
-    cp "$src/bin/st" "$assets/st"
+    tar -czf "$assets/st.tar.gz" -C "$src/bin" st st-lib
+    cp "$src/scripts/legacy-upgrade.sh" "$assets/st"
     cp "$src/install.sh" "$assets/install.sh"
     cp "$src/tmux/supertree.conf" "$assets/supertree.conf"
+    grep -qx "ST_VERSION='dev'" "$src/bin/st"
     grep -qx "ST_VERSION='dev'" "$assets/st"
-    (cd "$assets" && sha256sum st install.sh supertree.conf > SHA256SUMS)
+    (cd "$assets" && sha256sum st st.tar.gz install.sh supertree.conf > SHA256SUMS)
 
     # A failed upload leaves a draft; the next run resumes it with fresh assets.
     state=$(gh release view "$next" --json isDraft --jq '.isDraft' 2>/dev/null || true)
@@ -101,7 +103,7 @@ main() {
         gh release create "$next" --target "$sha" --draft \
           --title "$next" --generate-notes --notes-start-tag "$base"
       fi
-      gh release upload "$next" "$assets/st" "$assets/install.sh" \
+      gh release upload "$next" "$assets/st" "$assets/st.tar.gz" "$assets/install.sh" \
         "$assets/supertree.conf" "$assets/SHA256SUMS" --clobber
       gh release edit "$next" --draft=false --latest
     fi

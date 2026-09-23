@@ -26,6 +26,7 @@ WINDOWS_OVERRIDE_SET=${ST_WINDOWS+x}
 WINDOWS_OVERRIDE=${ST_WINDOWS:-}
 
 command -v curl >/dev/null 2>&1 || { printf 'st: curl is required\n' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { printf 'st: tar is required\n' >&2; exit 1; }
 
 if [ "$VERSION" = latest ]; then
   latest_url=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$RELEASE_ROOT/releases/latest") || {
@@ -345,19 +346,49 @@ fi
 
 step "03" "Install" "Putting supertree in the right places."
 
-curl -fsSL "$BASE/st"            -o "$tmpdir/st"            || die "could not download st from $BASE"
+curl -fsSL "$BASE/st.tar.gz"     -o "$tmpdir/st.tar.gz"     || die "could not download st from $BASE"
 curl -fsSL "$BASE/supertree.conf" -o "$tmpdir/supertree.conf" || die "could not download supertree.conf from $BASE"
-head -1 "$tmpdir/st" | grep -q '^#!' || die "downloaded st does not look like a script"
+tar -tzf "$tmpdir/st.tar.gz" | awk '
+  $0 == "st" || $0 == "st-lib/" || $0 ~ /^st-lib\/[A-Za-z0-9_.-]+\.sh$/ { next }
+  { exit 1 }
+' || die "downloaded st archive has unexpected paths"
+mkdir "$tmpdir/package"
+tar -xzf "$tmpdir/st.tar.gz" -C "$tmpdir/package" || die "could not unpack st from $BASE"
+head -1 "$tmpdir/package/st" | grep -q '^#!/usr/bin/env bash$' ||
+  die "downloaded st does not look like a script"
+[ -f "$tmpdir/package/st-lib/00-core.sh" ] || die "downloaded st is missing its modules"
+for file in "$tmpdir/package"/st-lib/*.sh; do
+  bash -n "$file" || die "downloaded st module has invalid shell syntax: $file"
+done
+bash -n "$tmpdir/package/st" || die "downloaded st has invalid shell syntax"
 
 # Release assets keep a development placeholder so the same file can be tagged
 # without a source edit. Record the resolved release in the installed command.
-sed "s|^ST_VERSION='dev'$|ST_VERSION='$VERSION'|" "$tmpdir/st" > "$tmpdir/stamped"
-mv "$tmpdir/stamped" "$tmpdir/st"
+sed "s|^ST_VERSION='dev'$|ST_VERSION='$VERSION'|" "$tmpdir/package/st" > "$tmpdir/stamped"
+grep -qx "ST_VERSION='$VERSION'" "$tmpdir/stamped" || die "downloaded st has invalid version metadata"
 
 mkdir -p "$PREFIX" "$CONFDIR"
-install -m 0755 "$tmpdir/st" "$PREFIX/st"
-# Keep custom install paths beside the command so `st uninstall` can find them
-# even when the install-time environment is no longer set.
+staged_command=$(mktemp "$PREFIX/.st.install.XXXXXX")
+staged_modules=$(mktemp -d "$PREFIX/.st-lib.install.XXXXXX")
+install -m 0755 "$tmpdir/stamped" "$staged_command"
+cp "$tmpdir/package"/st-lib/*.sh "$staged_modules/"
+previous_modules=''
+if [ -e "$PREFIX/st-lib-$VERSION" ]; then
+  previous_modules=$(mktemp -d "$PREFIX/.st-lib.previous.XXXXXX")
+  rmdir "$previous_modules"
+  mv "$PREFIX/st-lib-$VERSION" "$previous_modules"
+fi
+if ! mv "$staged_modules" "$PREFIX/st-lib-$VERSION"; then
+  [ -z "$previous_modules" ] || mv "$previous_modules" "$PREFIX/st-lib-$VERSION"
+  die "could not install st modules"
+fi
+if ! mv -f "$staged_command" "$PREFIX/st"; then
+  rm -rf "$PREFIX/st-lib-$VERSION"
+  [ -z "$previous_modules" ] || mv "$previous_modules" "$PREFIX/st-lib-$VERSION"
+  die "could not install st command"
+fi
+[ -z "$previous_modules" ] || rm -rf "$previous_modules"
+# Keep custom install paths for st uninstall.
 printf '%s\n%s\n' "$CONFDIR" "$TMUX_CONF" > "$PREFIX/st.install"
 row "command" "${GRN}✔${R}" "$PREFIX/st"
 
