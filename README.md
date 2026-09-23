@@ -5,8 +5,8 @@ and configurable tmux session, with your chosen coding agent and terminal tools
 already running.
 
 One key switches between trees, one key flips between your primary windows, and
-one key closes a tree. Reopening a tree puts the agent back in the same
-conversation.
+two keys leave tmux while keeping the tree running. Closing a tree with `st down`
+lets you reopen the agent in the same conversation.
 
 ```
 tmux sessions
@@ -79,8 +79,9 @@ update those with `git pull` instead.
 cd ~/projects/webauth
 st new feat-otp        # worktree + deps + env + session, drops you in the agent
 # ... work ...
-M-q                    # close the tree
-st resume feat-otp     # back, the agent continues the same conversation
+M-q                    # leave tmux; the tree keeps running
+st resume feat-otp     # back in the running tree
+st down feat-otp       # close the tree session; agent history stays
 st rm feat-otp         # done with it: session, worktree and branch go away
 ```
 
@@ -127,8 +128,8 @@ st down --all -y                 skip the confirmation
 | `M-w` | tree picker, ordered by most recently opened tree, with a `+ new branch…` row |
 | `M-e` | toggle between the first two configured windows |
 | `M-1` / `M-2` / `M-3` | select a configured window by position |
-| `M-q` | close this tree, asks first (worktree kept) |
-| `M-Q` (Option-Shift-Q) | close all linked worktree sessions, asks first (worktrees kept) |
+| `M-q` | leave tmux; keep the current tree session running |
+| `M-Q` (Option-Shift-Q) | leave tmux; keep the current tree session running |
 
 In the tree picker, press Enter to open a tree, Ctrl-D to delete the selected
 worktree, or Escape to close the picker.
@@ -263,16 +264,20 @@ repos; do not point `st` at a checkout you do not trust.
 `Ctrl-D`. The window falls back to a shell in the worktree. `M-1` recreates the
 configured agent window if it has been closed.
 
-**Close the tree** — `M-q` or `st down`. Kills only the tmux session. Unsaved
-editor buffers in that session are lost.
+**Leave tmux** — `M-q` or `M-Q` detaches your client and returns to your terminal
+shell. The tree session, agent, and editor keep running. Reattach with
+`st resume [branch]` or `tmux attach`.
 
-For `M-q`, `M-Q`, and `st rm`, `st` moves attached clients off a session before
+**Close the tree** — `st down`. Kills only the tmux session. Unsaved editor
+buffers in that session are lost.
+
+For `st down` and `st rm`, `st` moves attached clients off a session before
 closing it — back to the session they came from when possible (remembered per
 client tty under `~/.local/state/supertree/origin/`), otherwise to a remaining
 session. `st down --all` can detach clients when it closes the last tmux
 session. Your `detach-on-destroy` setting is left alone.
 
-**Close subtrees** — `M-Q` or `st down --subtrees` closes every linked worktree
+**Close subtrees** — `st down --subtrees` closes every linked worktree
 session and leaves each repository's main session open. If a main session is
 closed, `st` opens a shell there before closing its linked trees so tmux can
 keep the client attached. `st down --all` closes the main sessions too.

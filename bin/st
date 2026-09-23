@@ -883,7 +883,7 @@ st — supertree: worktree + tmux + coding-agent harness
 keys (inside tmux)
   M-w   tree picker          M-e   toggle first <-> second configured window
   M-1 / M-2 / M-3           select configured window by position
-  M-q   close this tree       M-Q   close all linked tree sessions
+  M-q / M-Q   leave tmux; keep the tree session running
 USAGE
 }
 
