@@ -64,14 +64,21 @@ printf '%s\n' "$TEST_ROOT/demo" > "$ST_STATE/repos"
 
 cd "$TEST_ROOT/demo"
 export ST_TEST_MAIN_SESSION
-ST_TEST_MAIN_SESSION=$("$ROOT/bin/st" status "demo/$(git branch --show-current)" | cut -f1)
-alpha_session=$("$ROOT/bin/st" status demo/alpha | cut -f1)
-beta_session=$("$ROOT/bin/st" status demo/beta | cut -f1)
+ST_TEST_MAIN_SESSION=$("$ROOT/bin/st" _sessions | grep "/$(git branch --show-current)-")
+alpha_session=$("$ROOT/bin/st" _sessions | grep '/alpha-')
+beta_session=$("$ROOT/bin/st" _sessions | grep '/beta-')
 "$ROOT/bin/st" go alpha
 "$ROOT/bin/st" go beta
 "$ROOT/bin/st" go alpha
 [ "$(sed -n '1p' "$ST_STATE/recent")" = "$alpha_session" ] || fail 'recent order did not put alpha first'
 [ "$(sed -n '2p' "$ST_STATE/recent")" = "$beta_session" ] || fail 'recent order did not put beta second'
+
+list=$("$ROOT/bin/st" ls)
+printf '%s\n' "$list" | grep -Eq '^TREE +SESSION +AGENT +CHANGES +TYPE$' || fail 'list has no grid headings'
+printf '%s\n' "$list" | grep -Eq '^demo/alpha +closed +- +clean +worktree$' || fail 'list did not show a readable tree row'
+if printf '%s\n' "$list" | grep -Eq '[[:xdigit:]]{32}|/demo-[[:xdigit:]]'; then
+  fail 'list exposed internal identity hashes'
+fi
 
 : > "$ST_TEST_LOG"
 ST_TEST_PICK_KEY=escape "$ROOT/bin/st" go --picker
@@ -108,12 +115,12 @@ if grep -q '^list-panes -a ' "$ST_TEST_LOG"; then
 fi
 
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=running ST_TEST_SCREEN='Working...' \
-  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\trunning' || fail 'running status'
+  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\trunning' || fail 'running status'
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=running ST_TEST_SCREEN='› ' \
-  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tinput' || fail 'input status'
+  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tinput' || fail 'input status'
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=done \
-  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tdone' || fail 'done status'
-"$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tclosed' || fail 'closed status'
+  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tdone' || fail 'done status'
+"$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tclosed' || fail 'closed status'
 
 : > "$ST_TEST_LOG"
 ST_TEST_HAS_SESSIONS=1 ST_TEST_MAIN_CLOSED=1 "$ROOT/bin/st" down --subtrees -y

@@ -153,6 +153,17 @@ session_for_label() {
   return 1
 }
 
+label_for_session() {
+  local wanted=$1 repo branch path
+  while IFS=$'\t' read -r repo branch path; do
+    if [ "$(sess_name "$repo" "$(branch_key "$branch")")" = "$wanted" ]; then
+      tree_label "$repo" "$branch"
+      return 0
+    fi
+  done < <(list_trees)
+  printf 'unknown tree'
+}
+
 # Git is the source of truth when reusing or removing a worktree. This also
 # recognizes trees created by older releases, whose directory names can collide.
 branch_worktree() {
@@ -277,7 +288,12 @@ create_window() {
 
 build_session() {
   local sess=$1 dir=$2 windows type first_name='' initial=1 branch label
-  tmux has-session -t "=$sess" 2>/dev/null && return 0
+  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
+  label="$(basename "$(main_worktree "$dir")")/${branch:-(detached)}"
+  if tmux has-session -t "=$sess" 2>/dev/null; then
+    tmux set-option -t "$sess" @supertree_label "$label"
+    return 0
+  fi
   windows=$(configured_windows)
   while read -r type; do
     [ -n "$type" ] || continue
@@ -290,8 +306,6 @@ build_session() {
   done <<EOF
 $windows
 EOF
-  branch=$(git -C "$dir" branch --show-current 2>/dev/null || true)
-  label="$(basename "$(main_worktree "$dir")")/${branch:-(detached)}"
   tmux set-option -t "$sess" @supertree_label "$label"
   tmux select-window -t "=$sess:$first_name"
 }
@@ -449,16 +463,15 @@ picker_rows() {
       repo_label = $1
       sub(/-[^-]*$/, "", repo_label)
       label = repo_label "/" $2
-      if (!(s in live)) { glyph = "·"; status = "closed" }
+      if (!(s in live)) { status = "closed" }
       else {
-        glyph = "●"
         status = "done"
         if (s in agent_pane && (agent_state[s] == "running" ||
             (agent_state[s] == "" && (agent_command[s] == bin ||
              agent_command[s] == "node" || agent_command[s] == "bun"))))
           status = "running"
       }
-      printf "%s %-28s %-7s\t%s\t%s\t%s\n", glyph, label, status, $3, s, agent_pane[s]
+      printf "%-28s  %-7s\t%s\t%s\t%s\n", label, status, $3, s, agent_pane[s]
     }
   ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r label path sess pane; do
     if [ -n "$pane" ] && [ "${label%running}" != "$label" ] && agent_needs_input "$pane"; then
@@ -497,14 +510,14 @@ cmd_new() {
     managed_tree "$main" "$branch" "$existing" ||
       die "$branch is already checked out outside supertree: $existing"
     dir=$existing
-    info "worktree already exists: $dir"
+    info "worktree already exists: $(basename "$main")/$branch"
   else
     [ ! -e "$dir" ] && [ ! -L "$dir" ] || die "path already exists: $dir"
     mkdir -p "$(dirname "$dir")"
     if git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
-      git -C "$main" worktree add "$dir" "$branch"
+      git -C "$main" worktree add -q "$dir" "$branch"
     else
-      git -C "$main" worktree add -b "$branch" "$dir" ${base:+"$base"}
+      git -C "$main" worktree add -q -b "$branch" "$dir" ${base:+"$base"}
     fi
   fi
 
@@ -534,7 +547,7 @@ cmd_trust() {
   fingerprint=$(config_fingerprint "$file")
   mkdir -p "$ST_STATE/trust"
   ( umask 077; printf '%s\n' "$fingerprint" > "$ST_STATE/trust/$(repo_key "$main")" )
-  info "trusted $file ($fingerprint); changes will require trusting it again"
+  info "trusted $file; changes will require trusting it again"
 }
 
 cmd_go() {
@@ -558,7 +571,7 @@ cmd_go() {
     [ -n "$popup_client" ] || die "no tmux client for tree picker"
     local self
     self=$(st_executable)
-    tmux display-popup -c "$popup_client" -d "$PWD" -E -w 70% -h 60% \
+    tmux display-popup -c "$popup_client" -d "$PWD" -E -w 80% -h 70% \
       -e "ST_PICKER_ROWS=$rows" "$self go --picker"
     return
   fi
@@ -570,7 +583,8 @@ cmd_go() {
     sel=$(printf '%s\n+ new branch…\t\t\n' "$rows" |
       fzf --delimiter=$'\t' --with-nth=1 --height=100% --reverse \
           --no-sort --sync \
-          --prompt='tree> ' --preview-window=hidden \
+          --border --border-label=' Trees ' \
+          --prompt='Find tree › ' --preview-window=hidden \
           --expect=ctrl-d --bind='esc:abort') || return 0
     key=${sel%%$'\n'*}
     sel=${sel#*$'\n'}
@@ -606,15 +620,35 @@ cmd_go() {
 }
 
 cmd_ls() {
-  local repo branch path s live dirty agent
-  printf '%-3s %-28s %-8s %-8s %s\n' '' 'TREE' 'SESSION' 'AGENT' 'PATH'
+  local repo branch path s live changes agent kind main
   list_trees | while IFS=$'\t' read -r repo branch path; do
     s=$(sess_name "$repo" "$(branch_key "$branch")")
-    if tmux has-session -t "=$s" 2>/dev/null; then live='live'; else live='-'; fi
-    agent=$(agent_status "$s")
-    if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then dirty='*'; else dirty=' '; fi
-    printf '%-3s %-28s %-8s %-8s %s\n' "$dirty" "$s" "$live" "$agent" "$path"
-  done
+    if tmux has-session -t "=$s" 2>/dev/null; then live='open'; else live='closed'; fi
+    if [ "$live" = open ]; then agent=$(agent_status "$s"); else agent='-'; fi
+    if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then changes='modified'; else changes='clean'; fi
+    main=$(main_worktree "$path")
+    if [ "$path" = "$main" ]; then kind='main'; else kind='worktree'; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(tree_label "$repo" "$branch")" "$live" "$agent" "$changes" "$kind"
+  done | awk -F '\t' '
+    { for (i = 1; i <= 5; i++) { cell[NR,i] = $i; if (length($i) > width[i]) width[i] = length($i) } }
+    END {
+      title[1] = "TREE"; title[2] = "SESSION"; title[3] = "AGENT"
+      title[4] = "CHANGES"; title[5] = "TYPE"
+      for (i = 1; i <= 5; i++) if (length(title[i]) > width[i]) width[i] = length(title[i])
+      for (row = 0; row <= NR; row++) {
+        for (i = 1; i <= 5; i++) {
+          value = row ? cell[row,i] : title[i]
+          if (i == 5) printf "%s\n", value
+          else printf "%-*s  ", width[i], value
+        }
+        if (row == 0) {
+          for (i = 1; i <= 5; i++) {
+            for (j = 0; j < width[i]; j++) printf "-"
+            printf "%s", (i == 5 ? "\n" : "  ")
+          }
+        }
+      }
+    }'
 }
 
 cmd_status() {
@@ -640,7 +674,7 @@ cmd_status() {
   else
     die "usage: st status <tree>  (omit tree inside tmux)"
   fi
-  printf '%s\t%s\n' "$s" "$(agent_status "$s")"
+  printf '%s\t%s\n' "$(label_for_session "$s")" "$(agent_status "$s")"
 }
 
 cmd_rm() {
@@ -666,14 +700,14 @@ cmd_rm() {
   old_sess=$(sess_name "$(basename "$main")" "$(slugify "$branch")")
   if [ "$dir" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ] &&
      tmux has-session -t "=$old_sess" 2>/dev/null; then
-    die "old session $old_sess is still open; close it before removing $branch"
+    die "an older session for $branch is still open; close it before removing the tree"
   fi
 
   dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
   if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-    unpushed=$(git -C "$dir" log --oneline '@{u}..' 2>/dev/null || true)
+    unpushed=$(git -C "$dir" log --format=%s '@{u}..' 2>/dev/null || true)
   elif [ -n "$(git -C "$dir" remote)" ]; then
-    unpushed=$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null || true)
+    unpushed=$(git -C "$dir" log --format=%s HEAD --not --remotes 2>/dev/null || true)
   else
     unpushed=''   # no remote configured, nothing can be "unpushed"
   fi
@@ -684,7 +718,7 @@ cmd_rm() {
     die "refusing to remove $branch — commit/push, or pass --force"
   fi
 
-  printf 'will remove:\n  session  %s\n  worktree %s\n  branch   %s (only if merged)\n' "$sess" "$dir" "$branch" >&2
+  printf 'will remove:\n  tree      %s/%s\n  session   close\n  checkout  remove\n  branch    delete if merged\n' "$(basename "$main")" "$branch" >&2
   printf 'proceed? [y/N] ' >&2; read -r ans
   case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
 
@@ -695,9 +729,9 @@ cmd_rm() {
   tmux kill-session -t "=$sess" 2>/dev/null || true
   if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
   else git -C "$main" worktree remove "$dir"; fi
-  git -C "$main" branch -d "$branch" 2>/dev/null || info "branch $branch kept (not merged)"
+  git -C "$main" branch -d "$branch" >/dev/null 2>&1 || info "branch $branch kept (not merged)"
   clear_tree_state "$repo" "$slug" "$sess"
-  info "removed $sess"
+  info "removed $(basename "$main")/$branch"
 }
 
 clear_tree_state() {
@@ -763,7 +797,11 @@ cmd_remove_all() {
   printf 'will remove from %s:\n' "$root" >&2
   local i
   for ((i=0; i<${#dirs[@]}; i++)); do
-    printf '  %-10s %s\n' "${kinds[i]}" "${dirs[i]}" >&2
+    if [ "${kinds[i]}" = worktree ]; then
+      printf '  %-10s %s/%s\n' worktree "$(basename "${mains[i]}")" "${branches[i]:-(detached)}" >&2
+    else
+      printf '  %-10s %s\n' repository "${dirs[i]}" >&2
+    fi
   done
   for ((i=0; i<${#dirs[@]}; i++)); do
     dir=${dirs[i]}
@@ -783,12 +821,12 @@ cmd_remove_all() {
     dirty=$(git -C "$dir" status --porcelain 2>/dev/null || true)
     unpushed=''
     if git -C "$dir" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-      unpushed=$(git -C "$dir" log --oneline '@{u}..' 2>/dev/null || true)
+      unpushed=$(git -C "$dir" log --format=%s '@{u}..' 2>/dev/null || true)
     elif [ -n "$(git -C "$dir" remote)" ]; then
-      unpushed=$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null || true)
+      unpushed=$(git -C "$dir" log --format=%s HEAD --not --remotes 2>/dev/null || true)
     fi
     if [ "$force" = 0 ] && [ -n "$dirty$unpushed" ]; then
-      die "refusing to remove $dir with uncommitted or unpushed work; pass --force"
+      die "refusing to remove $(basename "$main")/${branch:-(detached)} with uncommitted or unpushed work; pass --force"
     fi
   done
   printf 'proceed? [y/N] ' >&2; read -r ans
@@ -818,7 +856,7 @@ cmd_remove_all() {
         else tmux kill-session -t "=$sess" 2>/dev/null || true; fi
         if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
         else git -C "$main" worktree remove "$dir"; fi
-        [ -z "$branch" ] || git -C "$main" branch -d "$branch" 2>/dev/null ||
+        [ -z "$branch" ] || git -C "$main" branch -d "$branch" >/dev/null 2>&1 ||
           info "branch $branch kept (not merged)"
         clear_tree_state "$repo" "$(branch_key "${branch:-(detached)}")" "$sess"
       else
@@ -834,7 +872,11 @@ cmd_remove_all() {
           mv "$tmp" "$ST_REPOS"
         fi
       fi
-      info "removed $dir"
+      if [ "$kind" = worktree ]; then
+        info "removed $(basename "$main")/${branch:-(detached)}"
+      else
+        info "removed $dir"
+      fi
     done
   done
   if [ "$close_current" = 1 ]; then
@@ -888,6 +930,7 @@ ensure_main_fallbacks() {
     main_sess=$(sess_name "$repo" "$(branch_key "$main_branch")")
     if ! tmux has-session -t "=$main_sess" 2>/dev/null; then
       tmux new-session -d -s "$main_sess" -c "$main" -n shell
+      tmux set-option -t "$main_sess" @supertree_label "$(basename "$main")/$main_branch"
     fi
   done
 }
@@ -907,7 +950,10 @@ cmd_down() {
     if [ "$target" = --all ]; then live=$(live_sessions)
     else live=$(live_subtree_sessions); fi
     [ -n "$live" ] || { info "no matching tree sessions open"; return 0; }
-    printf 'will close:\n%s\n' "$live" >&2
+    printf 'will close:\n' >&2
+    while IFS= read -r s; do printf '  %s\n' "$(label_for_session "$s")" >&2; done <<EOF
+$live
+EOF
     if [ "$yes" = 0 ]; then
       printf 'unsaved editor buffers are lost. proceed? [y/N] ' >&2; read -r ans
       case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
@@ -939,13 +985,13 @@ cmd_down() {
   # guard: only ever kill sessions that belong to a known worktree
   case $'\n'"$all"$'\n' in
     *$'\n'"$s"$'\n'*) ;;
-    *) die "$s is not a supertree session, refusing to kill it";;
+    *) die "this is not a supertree session; refusing to close it";;
   esac
 
-  tmux has-session -t "=$s" 2>/dev/null || { info "$s already closed"; return 0; }
+  tmux has-session -t "=$s" 2>/dev/null || { info "$(label_for_session "$s") already closed"; return 0; }
   evacuate_clients "$s"
   tmux kill-session -t "=$s"
-  info "closed $s (worktree kept — 'st resume' brings it back)"
+  info "closed $(label_for_session "$s") (worktree kept — 'st resume' brings it back)"
 }
 
 cmd_toggle() {
@@ -1218,7 +1264,7 @@ st — supertree: worktree + tmux + coding-agent harness
   st go [query]                              pick a tree (fzf) and switch to it
   st resume [query]                          same as go — reopens a closed tree, agent continues
   st down [branch|--subtrees|--all]          close tree sessions, keep worktrees
-  st ls                                      list worktrees, session state, dirtiness
+  st ls                                      show every tree in a readable grid
   st status [tree]                           check agent: running, input, done, closed
   st rm <branch> [--force]                   kill session, remove worktree, prune branch
   st remove all [--force]                    remove Git checkouts under worktree root
