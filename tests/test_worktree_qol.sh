@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TEST_ROOT=$(mktemp -d)
+TEST_ROOT=$(cd "$TEST_ROOT" && pwd -P)
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export HOME="$TEST_ROOT/home"
@@ -24,7 +25,7 @@ case ${1:-} in
     if [ "${ST_TEST_MAIN_CLOSED:-0}" = 1 ] &&
        [[ $* == *"=$ST_TEST_MAIN_SESSION"* ]]; then exit 1; fi
     [ "${ST_TEST_HAS_SESSIONS:-0}" = 1 ]; exit;;
-  set-option) case $* in *'-t =demo/'*) exit 1;; esac;;
+  set-option) case $* in *'-t =demo-'*) exit 1;; esac;;
   show-options)
     case $* in
       *'@st_agent_window'*) printf 'codex\n';;
@@ -62,11 +63,15 @@ git -C "$TEST_ROOT/demo" worktree add -q -b beta "$ST_WORKTREE_ROOT/demo/beta"
 printf '%s\n' "$TEST_ROOT/demo" > "$ST_STATE/repos"
 
 cd "$TEST_ROOT/demo"
+export ST_TEST_MAIN_SESSION
+ST_TEST_MAIN_SESSION=$("$ROOT/bin/st" status "demo/$(git branch --show-current)" | cut -f1)
+alpha_session=$("$ROOT/bin/st" status demo/alpha | cut -f1)
+beta_session=$("$ROOT/bin/st" status demo/beta | cut -f1)
 "$ROOT/bin/st" go alpha
 "$ROOT/bin/st" go beta
 "$ROOT/bin/st" go alpha
-[ "$(sed -n '1p' "$ST_STATE/recent")" = demo/alpha ] || fail 'recent order did not put alpha first'
-[ "$(sed -n '2p' "$ST_STATE/recent")" = demo/beta ] || fail 'recent order did not put beta second'
+[ "$(sed -n '1p' "$ST_STATE/recent")" = "$alpha_session" ] || fail 'recent order did not put alpha first'
+[ "$(sed -n '2p' "$ST_STATE/recent")" = "$beta_session" ] || fail 'recent order did not put beta second'
 
 : > "$ST_TEST_LOG"
 ST_TEST_PICK_KEY=escape "$ROOT/bin/st" go --picker
@@ -79,7 +84,7 @@ if grep -Eq '^(attach-session|switch-client) ' "$ST_TEST_LOG"; then
 fi
 
 : > "$ST_TEST_LOG"
-ST_TEST_PANES=$'demo/alpha\tcodex\t%1\trunning\tcodex\tbash\ndemo/beta\tcodex\t%2\tdone\tcodex\tbash' \
+ST_TEST_PANES=$(printf '%s\tcodex\t%%1\trunning\tcodex\tbash\n%s\tcodex\t%%2\tdone\tcodex\tbash' "$alpha_session" "$beta_session") \
   ST_TEST_SCREEN='Working...' ST_TEST_PICK_KEY=escape "$ROOT/bin/st" go --picker
 grep -E 'demo/alpha +running' "$ST_TEST_PICKER_INPUT" >/dev/null || fail 'picker lost running status'
 grep -E 'demo/beta +done' "$ST_TEST_PICKER_INPUT" >/dev/null || fail 'picker lost done status'
@@ -89,7 +94,7 @@ if grep -q '^has-session ' "$ST_TEST_LOG"; then
 fi
 
 : > "$ST_TEST_LOG"
-ST_TEST_PANES=$'demo/alpha\tcodex\t%1\tdone\tcodex\tbash' \
+ST_TEST_PANES=$(printf '%s\tcodex\t%%1\tdone\tcodex\tbash' "$alpha_session") \
   "$ROOT/bin/st" go --popup /dev/ttys999
 grep -F 'display-popup -c /dev/ttys999' "$ST_TEST_LOG" >/dev/null || fail 'popup was not opened after preparation'
 grep -F 'ST_PICKER_ROWS=' "$ST_TEST_LOG" >/dev/null || fail 'popup did not receive prepared rows'
@@ -103,19 +108,18 @@ if grep -q '^list-panes -a ' "$ST_TEST_LOG"; then
 fi
 
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=running ST_TEST_SCREEN='Working...' \
-  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\trunning' || fail 'running status'
+  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\trunning' || fail 'running status'
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=running ST_TEST_SCREEN='› ' \
-  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tinput' || fail 'input status'
+  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tinput' || fail 'input status'
 ST_TEST_HAS_SESSIONS=1 ST_TEST_AGENT_STATE=done \
-  "$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tdone' || fail 'done status'
-"$ROOT/bin/st" status demo/alpha | grep -q $'demo/alpha\tclosed' || fail 'closed status'
+  "$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tdone' || fail 'done status'
+"$ROOT/bin/st" status demo/alpha | grep -q "$alpha_session"$'\tclosed' || fail 'closed status'
 
 : > "$ST_TEST_LOG"
-export ST_TEST_MAIN_SESSION="demo/$(git branch --show-current)"
 ST_TEST_HAS_SESSIONS=1 ST_TEST_MAIN_CLOSED=1 "$ROOT/bin/st" down --subtrees -y
 grep -F "new-session -d -s $ST_TEST_MAIN_SESSION" "$ST_TEST_LOG" >/dev/null || fail 'main fallback was not opened'
-grep -F 'kill-session -t =demo/alpha' "$ST_TEST_LOG" >/dev/null || fail 'alpha was not closed'
-grep -F 'kill-session -t =demo/beta' "$ST_TEST_LOG" >/dev/null || fail 'beta was not closed'
+grep -F "kill-session -t =$alpha_session" "$ST_TEST_LOG" >/dev/null || fail 'alpha was not closed'
+grep -F "kill-session -t =$beta_session" "$ST_TEST_LOG" >/dev/null || fail 'beta was not closed'
 if grep -F "kill-session -t =$ST_TEST_MAIN_SESSION" "$ST_TEST_LOG" >/dev/null; then
   fail 'main session was closed'
 fi
@@ -134,7 +138,7 @@ rm "$ST_WORKTREE_ROOT/demo/beta/new-file"
 
 printf 'y\n' | ST_TEST_PICK_KEY=delete "$ROOT/bin/st" go --picker
 [ ! -d "$ST_WORKTREE_ROOT/demo/beta" ] || fail 'picker did not delete beta'
-if grep -Fx demo/beta "$ST_STATE/recent" >/dev/null; then
+if grep -Fx "$beta_session" "$ST_STATE/recent" >/dev/null; then
   fail 'deleted tree stayed in recent list'
 fi
 
