@@ -64,9 +64,9 @@ printf '%s\n' "$TEST_ROOT/demo" > "$ST_STATE/repos"
 
 cd "$TEST_ROOT/demo"
 export ST_TEST_MAIN_SESSION
-ST_TEST_MAIN_SESSION=$("$ROOT/bin/st" _sessions | grep "/$(git branch --show-current)-")
-alpha_session=$("$ROOT/bin/st" _sessions | grep '/alpha-')
-beta_session=$("$ROOT/bin/st" _sessions | grep '/beta-')
+ST_TEST_MAIN_SESSION=$("$ROOT/bin/st" _sessions | grep -x "demo/$(git branch --show-current)")
+alpha_session=$("$ROOT/bin/st" _sessions | grep -x 'demo/alpha')
+beta_session=$("$ROOT/bin/st" _sessions | grep -x 'demo/beta')
 "$ROOT/bin/st" go alpha
 "$ROOT/bin/st" go beta
 "$ROOT/bin/st" go alpha

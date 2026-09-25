@@ -146,17 +146,15 @@ attach() {
 }
 
 known_sessions() {
-  list_trees | while IFS=$'\t' read -r repo branch path; do
-    sess_name "$repo" "$(branch_key "$branch")"; printf '\n'
-  done
+  list_trees | cut -f4
 }
 
 subtree_sessions() {
-  local repo branch path main
-  list_trees | while IFS=$'\t' read -r repo branch path; do
+  local repo branch path sess main
+  list_trees | while IFS=$'\t' read -r repo branch path sess; do
     main=$(main_worktree "$path")
     [ "$path" != "$main" ] || continue
-    sess_name "$repo" "$(branch_key "$branch")"; printf '\n'
+    printf '%s\n' "$sess"
   done
 }
 
@@ -177,15 +175,14 @@ live_subtree_sessions() {
 }
 
 ensure_main_fallbacks() {
-  local repo branch path main main_branch main_sess subtree
-  list_trees | while IFS=$'\t' read -r repo branch path; do
+  local repo branch path subtree main main_branch main_sess
+  list_trees | while IFS=$'\t' read -r repo branch path subtree; do
     main=$(main_worktree "$path")
     [ "$path" != "$main" ] || continue
-    subtree=$(sess_name "$repo" "$(branch_key "$branch")")
     tmux has-session -t "=$subtree" 2>/dev/null || continue
     main_branch=$(git -C "$main" branch --show-current)
     [ -n "$main_branch" ] || main_branch='(detached)'
-    main_sess=$(sess_name "$repo" "$(branch_key "$main_branch")")
+    main_sess=$(tree_session "$repo" "$main_branch")
     if ! tmux has-session -t "=$main_sess" 2>/dev/null; then
       tmux new-session -d -s "$main_sess" -c "$main" -n shell
       tmux set-option -t "$main_sess" @supertree_label "$(basename "$main")/$main_branch"
@@ -299,6 +296,27 @@ cmd_window() {
   select_window_type "$type"
 }
 
+cmd_last() {
+  local current trees sess path
+  [ -n "${TMUX:-}" ] || die "st last only works inside tmux"
+  [ -f "$ST_STATE/recent" ] || { info "no other tree opened yet"; return 0; }
+  current=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null || true)
+  trees=$(list_trees)
+  # Record the current tree so the next M-Tab comes straight back.
+  if printf '%s\n' "$trees" | cut -f4 | grep -qxF -- "$current"; then
+    remember_recent "$current"
+  fi
+  while IFS= read -r sess; do
+    [ -n "$sess" ] && [ "$sess" != "$current" ] || continue
+    path=$(printf '%s\n' "$trees" | awk -F '\t' -v s="$sess" '$4 == s && !found { print $3; found = 1 }')
+    [ -n "$path" ] || continue
+    build_session "$sess" "$path"
+    attach "$sess"
+    return 0
+  done < "$ST_STATE/recent"
+  info "no other tree opened yet"
+}
+
 cmd_agent() {
   select_window_type agent
 }
@@ -306,5 +324,6 @@ cmd_agent() {
 st_register_command 'down' cmd_down 'close sessions; keep worktrees' 'down [branch|--subtrees|--all]'
 st_register_command 'toggle' cmd_toggle ''
 st_register_command 'window' cmd_window ''
+st_register_command 'last' cmd_last 'switch to the previous tree'
 st_register_command 'agent' cmd_agent ''
 st_register_command '_sessions' known_sessions ''

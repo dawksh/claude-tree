@@ -188,6 +188,7 @@ st down --all -y                 skip the confirmation
 |---|---|
 | `M-w` | tree picker, ordered by most recently opened tree, with a `+ new branch…` row |
 | `M-e` | toggle between the first two configured windows |
+| `M-Tab` | switch to the tree you were in before; press again to come back |
 | `M-1` / `M-2` / `M-3` | select a configured window by position |
 | `M-q` | leave tmux; keep the current tree session running |
 | `M-Q` (Option-Shift-Q) | leave tmux; keep the current tree session running |
@@ -211,15 +212,16 @@ best effort check of the pane; custom agents may need their own prompt pattern.
 ```
 ~/projects/webauth                        main checkout
 ~/projects/.worktrees/webauth-<repo-id>/feat-otp-<branch-id>  worktree
-tmux session "webauth-<repo-id>/feat-otp-<branch-id>"          windows: codex, vim, shell
+tmux session "webauth/feat-otp"                                windows: codex, vim, shell
 ```
 
-The IDs are stable hashes of the main checkout path and the exact branch name.
-They keep branches such as `feat/a-b` and `feat-a-b`, and repositories with the
-same directory name, separate. Existing worktrees made with the old path layout
-are reused when Git confirms the exact repository and branch. New sessions use
-the new names, while the tmux status bar shows the readable `<repo>/<branch>`
-label. Close any old sessions before upgrading. Windows are addressed
+The IDs in worktree paths are stable hashes of the main checkout path and the
+exact branch name. They keep branches such as `feat/a-b` and `feat-a-b`, and
+repositories with the same directory name, separate. Existing worktrees made
+with the old path layout are reused when Git confirms the exact repository and
+branch. Session names stay readable as `<repo>/<branch>`; a short hash is added
+only when two trees would otherwise get the same name. Sessions opened under the
+older hashed names are renamed the next time supertree lists trees. Windows are addressed
 by **name**, not index, so your `base-index` setting is irrelevant.
 
 Each program window drops to an interactive shell in the same worktree when its

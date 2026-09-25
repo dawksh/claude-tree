@@ -21,10 +21,10 @@ register_repo() {
 }
 
 session_for_label() {
-  local wanted=$1 repo branch path
-  while IFS=$'\t' read -r repo branch path; do
+  local wanted=$1 repo branch path sess
+  while IFS=$'\t' read -r repo branch path sess; do
     if [ "$(tree_label "$repo" "$branch")" = "$wanted" ]; then
-      sess_name "$repo" "$(branch_key "$branch")"
+      printf '%s' "$sess"
       return 0
     fi
   done < <(list_trees)
@@ -32,9 +32,9 @@ session_for_label() {
 }
 
 label_for_session() {
-  local wanted=$1 repo branch path
-  while IFS=$'\t' read -r repo branch path; do
-    if [ "$(sess_name "$repo" "$(branch_key "$branch")")" = "$wanted" ]; then
+  local wanted=$1 repo branch path sess
+  while IFS=$'\t' read -r repo branch path sess; do
+    if [ "$sess" = "$wanted" ]; then
       tree_label "$repo" "$branch"
       return 0
     fi
@@ -86,9 +86,22 @@ tree_index() {
   printf '%s\n' "$n" | tee "$f"
 }
 
+# Sessions opened before readable names keep running under the new name.
+adopt_hashed_session() {
+  local repo=$1 branch=$2 sess=$3 live=$'\n'$4$'\n' hashed
+  case $live in *$'\n'"$repo/"*) ;; *) return 0;; esac
+  hashed=$(sess_name "$repo" "$(branch_key "$branch")")
+  case $live in *$'\n'"$hashed"$'\n'*) ;; *) return 0;; esac
+  case $live in *$'\n'"$sess"$'\n'*) return 0;; esac
+  tmux rename-session -t "=$hashed" "$sess" 2>/dev/null || true
+}
+
+# Rows: repo key, branch, path, tmux session. Session names stay readable
+# (repo/branch); a short hash is added only where two trees would collide.
 list_trees() {
-  local r repo
+  local r repo branch path sess clash live
   [ -f "$ST_REPOS" ] || return 0
+  live=$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
   while read -r r; do
     [ -d "$r" ] || continue
     repo=$(repo_key "$r")
@@ -96,5 +109,28 @@ list_trees() {
       /^worktree /{p=substr($0,10)}
       /^branch /{b=$2; sub("refs/heads/","",b); print repo"\t"b"\t"p}
       /^detached$/{print repo"\t(detached)\t"p}'
-  done < "$ST_REPOS"
+  done < "$ST_REPOS" | awk -F '\t' '
+    {
+      row[NR] = $0; branch[NR] = $2; name = $1; sub(/-[^-]*$/, "", name)
+      hash = $1; sub(/.*-/, "", hash)
+      repo_name[NR] = name; repo_hash[NR] = substr(hash, 1, 6)
+      if (!((name, $1) in seen_repo)) { seen_repo[name, $1] = 1; repos[name]++ }
+    }
+    END {
+      for (i = 1; i <= NR; i++) {
+        b = branch[i]; gsub(/[.:]/, "_", b)
+        sess[i] = repo_name[i] (repos[repo_name[i]] > 1 ? "-" repo_hash[i] : "") "/" b
+        if (!((sess[i], branch[i]) in seen_tree)) { seen_tree[sess[i], branch[i]] = 1; trees[sess[i]]++ }
+      }
+      for (i = 1; i <= NR; i++) print row[i] "\t" sess[i] "\t" (trees[sess[i]] > 1)
+    }' | while IFS=$'\t' read -r repo branch path sess clash; do
+    [ "$clash" = 0 ] || sess="$sess-$(identity_hash "$branch" | cut -c1-6)"
+    adopt_hashed_session "$repo" "$branch" "$sess" "$live"
+    printf '%s\t%s\t%s\t%s\n' "$repo" "$branch" "$path" "$sess"
+  done
+}
+
+tree_session() {
+  list_trees | awk -F '\t' -v repo="$1" -v branch="$2" \
+    '$1 == repo && $2 == branch && !found { print $4; found = 1 }'
 }
