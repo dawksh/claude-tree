@@ -60,8 +60,14 @@ rule() {
   printf '%s\n' "$R"
 }
 title() {
-  printf '\n  %s◆%s  %sSUPERTREE%s  %sinstaller %s%s\n' "$CYN" "$R" "$B" "$R" "$D" "$VERSION" "$R"
-  printf '     %sworktrees × tmux × coding agents%s\n' "$D" "$R"
+  printf '\n%s%s' "$CYN" "$B"
+  printf '%s\n' \
+    '   ___  _   _  ___  ___  ___  _____  ___  ___  ___' \
+    '  / __|| | | || _ \| __|| _ \|_   _|| _ \| __|| __|' \
+    '  \__ \| |_| ||  _/| _| |   /  | |  |   /| _| | _|' \
+    '  |___/ \___/ |_|  |___||_|_\  |_|  |_|_\|___||___|'
+  printf '%s\n' "$R"
+  printf '  %sworktrees × tmux × coding agents%s   %sinstaller %s%s\n' "$D" "$R" "$D" "$VERSION" "$R"
   rule
 }
 step() { # number, title, description
