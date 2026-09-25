@@ -8,52 +8,81 @@
 #   ST_CONFDIR=~/.conf  where the tmux fragment goes    (default ~/.config/supertree)
 #   ST_NO_TMUX_CONF=1   skip touching ~/.tmux.conf
 #   ST_YES=1            answer yes to every prompt (non-interactive installs)
+#   ST_HARNESS=codex     choose claude, codex, or openrouter without a prompt
+#   ST_WINDOWS='agent shell'  choose and order tmux windows
 set -euo pipefail
 
+PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+
 REPO=dawksh/supertree
+RELEASE_ROOT=${ST_RELEASE_ROOT:-https://github.com/$REPO}
 VERSION=${ST_VERSION:-latest}
 PREFIX=${ST_PREFIX:-$HOME/.local/bin}
 CONFDIR=${ST_CONFDIR:-$HOME/.config/supertree}
 TMUX_CONF=${TMUX_CONF:-$HOME/.tmux.conf}
+CONFIG="$CONFDIR/config"
+HARNESS_OVERRIDE=${ST_HARNESS:-}
+WINDOWS_OVERRIDE_SET=${ST_WINDOWS+x}
+WINDOWS_OVERRIDE=${ST_WINDOWS:-}
+
+command -v curl >/dev/null 2>&1 || { printf 'st: curl is required\n' >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { printf 'st: tar is required\n' >&2; exit 1; }
 
 if [ "$VERSION" = latest ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
+  latest_url=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$RELEASE_ROOT/releases/latest") || {
+    printf 'st: could not determine the latest release\n' >&2
+    exit 1
+  }
+  VERSION=${latest_url##*/}
 fi
+case $VERSION in
+  ''|*[!A-Za-z0-9._-]*) printf 'st: invalid release version: %s\n' "$VERSION" >&2; exit 1;;
+esac
+BASE="$RELEASE_ROOT/releases/download/$VERSION"
 
 # ----------------------------------------------------------------- output
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   B=$(printf '\033[1m'); D=$(printf '\033[2m'); R=$(printf '\033[0m')
   GRN=$(printf '\033[32m'); RED=$(printf '\033[31m'); YLW=$(printf '\033[33m')
+  CYN=$(printf '\033[36m')
 else
-  B=""; D=""; R=""; GRN=""; RED=""; YLW=""
+  B=""; D=""; R=""; GRN=""; RED=""; YLW=""; CYN=""
 fi
 
-WIDTH=52
+WIDTH=56
 # progress lines overwrite themselves on a terminal, stack up in a pipe or log
 if [ -t 1 ]; then CLEAR='\033[2K\r'; else CLEAR='\n'; fi
-rule() { printf '%s' "$D"; printf '─%.0s' $(seq 1 $WIDTH); printf '%s\n' "$R"; }
-title() {
-  printf '\n  %ssupertree%s %sinstaller%s\n' "$B" "$R" "$D" "$R"
-  printf '  %sworktree + tmux + Claude Code harness%s\n\n' "$D" "$R"
+rule() {
+  local i=0
+  printf '  %s' "$D"
+  while [ "$i" -lt "$WIDTH" ]; do printf '─'; i=$((i + 1)); done
+  printf '%s\n' "$R"
 }
-step() { printf '\n  %s%s%s\n\n' "$B" "$1" "$R"; }
-ok()   { printf '  %s✔%s %s\n' "$GRN" "$R" "$1"; }
-bad()  { printf '  %s✘%s %s\n' "$RED" "$R" "$1"; }
-warn() { printf '  %s!%s %s\n' "$YLW" "$R" "$1"; }
-die()  { printf '\n  %s✘ %s%s\n\n' "$RED" "$1" "$R" >&2; exit 1; }
+title() {
+  printf '\n  %s◆%s  %sSUPERTREE%s  %sinstaller %s%s\n' "$CYN" "$R" "$B" "$R" "$D" "$VERSION" "$R"
+  printf '     %sworktrees × tmux × coding agents%s\n' "$D" "$R"
+  rule
+}
+step() { # number, title, description
+  printf '\n  %s%s%s  %s%s%s\n' "$CYN" "$1" "$R" "$B" "$2" "$R"
+  [ -z "${3:-}" ] || printf '      %s%s%s\n' "$D" "$3" "$R"
+  printf '\n'
+}
+ok()   { printf '      %s✔%s  %s\n' "$GRN" "$R" "$1"; }
+bad()  { printf '      %s✘%s  %s\n' "$RED" "$R" "$1"; }
+warn() { printf '      %s!%s  %s\n' "$YLW" "$R" "$1"; }
+die()  { printf '\n      %s✘ %s%s\n\n' "$RED" "$1" "$R" >&2; exit 1; }
 
 row() { # name, status glyph+color, detail
-  printf '  %s %-9s %s%s%s\n' "$2" "$1" "$D" "$3" "$R"
+  printf '      %s  %-10s %s%s%s\n' "$2" "$1" "$D" "$3" "$R"
 }
 
 ask() { # question -> 0 yes, 1 no
   [ "${ST_YES:-0}" = 1 ] && return 0
   [ -r /dev/tty ] || { warn "no terminal to ask on; skipping"; return 1; }
   local a
-  printf '\n  %s %s[Y/n]%s ' "$1" "$D" "$R"
+  printf '\n      %s %s[Y/n]%s ' "$1" "$D" "$R"
   # a failed read means no one is there to answer — never take that as consent
   if ! { read -r a < /dev/tty; } 2>/dev/null; then
     printf '\n'; warn "no terminal to ask on; skipping"; return 1
@@ -61,9 +90,129 @@ ask() { # question -> 0 yes, 1 no
   case ${a:-y} in y|Y|yes|YES) return 0;; *) return 1;; esac
 }
 
+# --------------------------------------------------------------- harness
+
+harness_valid() {
+  case $1 in *[!A-Za-z0-9_-]*|'') return 1;; *) return 0;; esac
+}
+
+harness_bin() {
+  case $1 in
+    claude) echo claude;;
+    codex) echo codex;;
+    openrouter) echo opencode;;
+    *) echo "";;
+  esac
+}
+
+harness_label() {
+  case $1 in
+    claude) echo "Claude Code";;
+    codex) echo "Codex";;
+    openrouter) echo "OpenRouter via OpenCode";;
+    *) echo "$1 (custom)";;
+  esac
+}
+
+select_harness() {
+  local configured="" choice=""
+  CONFIG_HARNESS_NEEDS_WRITE=0
+  if [ -n "$HARNESS_OVERRIDE" ]; then
+    harness_valid "$HARNESS_OVERRIDE" || die "invalid ST_HARNESS: $HARNESS_OVERRIDE"
+    HARNESS=$HARNESS_OVERRIDE
+    CONFIG_HARNESS_NEEDS_WRITE=1
+    return
+  fi
+  if [ -f "$CONFIG" ]; then
+    configured=$( ( unset ST_HARNESS; . "$CONFIG"; printf '%s' "${ST_HARNESS:-}" ) )
+    if harness_valid "$configured"; then
+      HARNESS=$configured
+      return
+    fi
+  fi
+  if [ -r /dev/tty ] && [ "${ST_YES:-0}" != 1 ]; then
+    printf '      1  Claude Code %s(default)%s\n' "$D" "$R"
+    printf '      2  Codex\n'
+    printf '      3  OpenRouter %s(via OpenCode)%s\n' "$D" "$R"
+    printf '\n      choose harness %s[1]%s ' "$D" "$R"
+    read -r choice < /dev/tty || choice=""
+  fi
+  case ${choice:-1} in
+    1|claude) HARNESS=claude;;
+    2|codex) HARNESS=codex;;
+    3|openrouter) HARNESS=openrouter;;
+    *) die "unknown harness choice: $choice";;
+  esac
+  CONFIG_HARNESS_NEEDS_WRITE=1
+}
+
+windows_valid() {
+  local type seen=' '
+  [ -n "$1" ] || return 1
+  for type in $1; do
+    case $type in agent|vim|shell) ;; *) return 1;; esac
+    case $seen in *" $type "*) return 1;; esac
+    seen="$seen$type "
+  done
+}
+
+windows_include() {
+  case " $WINDOWS " in *" $1 "*) return 0;; *) return 1;; esac
+}
+
+select_windows() {
+  local configured=""
+  CONFIG_WINDOWS_NEEDS_WRITE=0
+  if [ "$WINDOWS_OVERRIDE_SET" = x ]; then
+    windows_valid "$WINDOWS_OVERRIDE" || die "invalid ST_WINDOWS: $WINDOWS_OVERRIDE"
+    WINDOWS=$WINDOWS_OVERRIDE
+    CONFIG_WINDOWS_NEEDS_WRITE=1
+    return
+  fi
+  if [ -f "$CONFIG" ]; then
+    configured=$( ( unset ST_WINDOWS; . "$CONFIG"; printf '%s' "${ST_WINDOWS-__ST_UNSET__}" ) )
+    if [ "$configured" != __ST_UNSET__ ]; then
+      windows_valid "$configured" || die "invalid ST_WINDOWS in $CONFIG: $configured"
+      WINDOWS=$configured
+      return
+    fi
+  fi
+  WINDOWS='agent vim shell'
+  [ -f "$CONFIG" ] || CONFIG_WINDOWS_NEEDS_WRITE=1
+}
+
+write_config() {
+  local staged="$tmpdir/config"
+  if [ -f "$CONFIG" ] && { [ "$CONFIG_HARNESS_NEEDS_WRITE" = 1 ] || [ "$CONFIG_WINDOWS_NEEDS_WRITE" = 1 ]; }; then
+    awk -v harness="$HARNESS" -v windows="$WINDOWS" \
+        -v write_harness="$CONFIG_HARNESS_NEEDS_WRITE" -v write_windows="$CONFIG_WINDOWS_NEEDS_WRITE" '
+      BEGIN { harness_written=0; windows_written=0 }
+      /^ST_HARNESS=/ && write_harness { if (!harness_written) print "ST_HARNESS=" harness; harness_written=1; next }
+      /^ST_WINDOWS=/ && write_windows { if (!windows_written) print "ST_WINDOWS=\"" windows "\""; windows_written=1; next }
+      { print }
+      END {
+        if (write_harness && !harness_written) print "ST_HARNESS=" harness
+        if (write_windows && !windows_written) print "ST_WINDOWS=\"" windows "\""
+      }
+    ' "$CONFIG" > "$staged"
+    install -m 0644 "$staged" "$CONFIG"
+  elif [ ! -f "$CONFIG" ]; then
+    printf '%s\n' \
+      '# supertree user config — sourced as shell by st' \
+      '# built-ins: claude, codex, openrouter (OpenCode connected to OpenRouter)' \
+      "ST_HARNESS=$HARNESS" \
+      "ST_WINDOWS='$WINDOWS'" \
+      '' \
+      '# Custom harness example:' \
+      '# ST_HARNESS=aider' \
+      "# ST_HARNESS_COMMAND='aider'" \
+      "# ST_HARNESS_RESUME_COMMAND='aider --resume'" > "$CONFIG"
+  fi
+}
+
 # ------------------------------------------------------------ dependencies
 
-DEPS="tmux git fzf nvim claude"
+DEPS="tmux git fzf"
 
 dep_why() {
   case $1 in
@@ -71,7 +220,9 @@ dep_why() {
     git)    echo "required for worktrees";;
     fzf)    echo "tree picker (M-w)";;
     nvim)   echo "editor window (M-2)";;
-    claude) echo "claude window (M-1)";;
+    claude) echo "selected agent harness (M-1)";;
+    codex) echo "selected agent harness (M-1)";;
+    opencode) echo "OpenRouter agent harness (M-1)";;
   esac
 }
 
@@ -110,11 +261,18 @@ install_one() { # cmd, pm, logfile
   local cmd=$1 pm=$2 log=$3 pkg S
   pkg=$(pkg_name "$cmd"); S=$(sudo_if_needed)
 
-  # Claude Code ships its own installer; package managers only carry it on brew.
-  # https://code.claude.com/docs/en/setup#install-claude-code
+  # Agent harnesses ship their own installers.
   if [ "$cmd" = claude ]; then
     if [ "$pm" = brew ]; then brew install --cask claude-code >>"$log" 2>&1
     else curl -fsSL https://claude.ai/install.sh | bash >>"$log" 2>&1; fi
+    return
+  fi
+  if [ "$cmd" = codex ]; then
+    curl -fsSL https://chatgpt.com/codex/install.sh | sh >>"$log" 2>&1
+    return
+  fi
+  if [ "$cmd" = opencode ]; then
+    curl -fsSL https://opencode.ai/install | bash >>"$log" 2>&1
     return
   fi
 
@@ -130,14 +288,20 @@ install_one() { # cmd, pm, logfile
 
 # ------------------------------------------------------------------ main
 
-command -v curl >/dev/null 2>&1 || die "curl is required"
-
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT
 LOG="$tmpdir/install.log"
 
 title
-rule
-step "dependencies"
+step "01" "Workspace" "Choose what every new tree opens."
+select_harness
+select_windows
+row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS")"
+row "windows" "${GRN}✔${R}" "${WINDOWS// / · }"
+harness_cmd=$(harness_bin "$HARNESS")
+windows_include vim && DEPS="$DEPS nvim"
+windows_include agent && [ -n "$harness_cmd" ] && DEPS="$DEPS $harness_cmd"
+
+step "02" "Dependencies" "Checking the tools this workspace needs."
 
 missing=""
 for d in $DEPS; do
@@ -160,7 +324,7 @@ if [ -n "$missing" ]; then
   elif ask "install $n missing package(s) with $B$pm$R?"; then
     printf '\n'
     for d in $missing; do
-      printf '  %s…%s installing %-8s' "$D" "$R" "$d"
+      printf '      %s…%s installing %-8s' "$D" "$R" "$d"
       if install_one "$d" "$pm" "$LOG"; then printf "$CLEAR"; ok "installed $d"
       else printf "$CLEAR"; bad "failed $d — see log below"; fi
     done
@@ -180,18 +344,60 @@ fi
 
 # ------------------------------------------------------------- supertree
 
-step "supertree"
+step "03" "Install" "Putting supertree in the right places."
 
-curl -fsSL "$BASE/st"            -o "$tmpdir/st"            || die "could not download st from $BASE"
+curl -fsSL "$BASE/st.tar.gz"     -o "$tmpdir/st.tar.gz"     || die "could not download st from $BASE"
 curl -fsSL "$BASE/supertree.conf" -o "$tmpdir/supertree.conf" || die "could not download supertree.conf from $BASE"
-head -1 "$tmpdir/st" | grep -q '^#!' || die "downloaded st does not look like a script"
+tar -tzf "$tmpdir/st.tar.gz" | awk '
+  $0 == "st" || $0 == "st-lib/" || $0 ~ /^st-lib\/[A-Za-z0-9_.-]+\.sh$/ { next }
+  { exit 1 }
+' || die "downloaded st archive has unexpected paths"
+mkdir "$tmpdir/package"
+tar -xzf "$tmpdir/st.tar.gz" -C "$tmpdir/package" || die "could not unpack st from $BASE"
+head -1 "$tmpdir/package/st" | grep -q '^#!/usr/bin/env bash$' ||
+  die "downloaded st does not look like a script"
+[ -f "$tmpdir/package/st-lib/00-core.sh" ] || die "downloaded st is missing its modules"
+for file in "$tmpdir/package"/st-lib/*.sh; do
+  bash -n "$file" || die "downloaded st module has invalid shell syntax: $file"
+done
+bash -n "$tmpdir/package/st" || die "downloaded st has invalid shell syntax"
+
+# Release assets keep a development placeholder so the same file can be tagged
+# without a source edit. Record the resolved release in the installed command.
+sed "s|^ST_VERSION='dev'$|ST_VERSION='$VERSION'|" "$tmpdir/package/st" > "$tmpdir/stamped"
+grep -qx "ST_VERSION='$VERSION'" "$tmpdir/stamped" || die "downloaded st has invalid version metadata"
 
 mkdir -p "$PREFIX" "$CONFDIR"
-install -m 0755 "$tmpdir/st" "$PREFIX/st"
-ok "st           $PREFIX/st"
+staged_command=$(mktemp "$PREFIX/.st.install.XXXXXX")
+staged_modules=$(mktemp -d "$PREFIX/.st-lib.install.XXXXXX")
+install -m 0755 "$tmpdir/stamped" "$staged_command"
+cp "$tmpdir/package"/st-lib/*.sh "$staged_modules/"
+previous_modules=''
+if [ -e "$PREFIX/st-lib-$VERSION" ]; then
+  previous_modules=$(mktemp -d "$PREFIX/.st-lib.previous.XXXXXX")
+  rmdir "$previous_modules"
+  mv "$PREFIX/st-lib-$VERSION" "$previous_modules"
+fi
+if ! mv "$staged_modules" "$PREFIX/st-lib-$VERSION"; then
+  [ -z "$previous_modules" ] || mv "$previous_modules" "$PREFIX/st-lib-$VERSION"
+  die "could not install st modules"
+fi
+if ! mv -f "$staged_command" "$PREFIX/st"; then
+  rm -rf "$PREFIX/st-lib-$VERSION"
+  [ -z "$previous_modules" ] || mv "$previous_modules" "$PREFIX/st-lib-$VERSION"
+  die "could not install st command"
+fi
+[ -z "$previous_modules" ] || rm -rf "$previous_modules"
+# Keep custom install paths for st uninstall.
+printf '%s\n%s\n' "$CONFDIR" "$TMUX_CONF" > "$PREFIX/st.install"
+row "command" "${GRN}✔${R}" "$PREFIX/st"
 
 sed "s|~/.local/bin/st|$PREFIX/st|g" "$tmpdir/supertree.conf" > "$CONFDIR/supertree.conf"
-ok "bindings     $CONFDIR/supertree.conf"
+row "bindings" "${GRN}✔${R}" "$CONFDIR/supertree.conf"
+
+write_config
+row "harness" "${GRN}✔${R}" "$(harness_label "$HARNESS") · $CONFIG"
+row "windows" "${GRN}✔${R}" "${WINDOWS// / · }"
 
 if [ "${ST_NO_TMUX_CONF:-0}" != 1 ]; then
   if [ -f "$TMUX_CONF" ] && grep -q 'supertree.conf' "$TMUX_CONF"; then
@@ -209,12 +415,16 @@ fi
 case ":$PATH:" in
   *":$PREFIX:"*) ;;
   *) printf '\n'; warn "$PREFIX is not on your PATH"
-     printf '    %sexport PATH="%s:$PATH"%s\n' "$D" "$PREFIX" "$R";;
+     printf '         %sexport PATH="%s:$PATH"%s\n' "$D" "$PREFIX" "$R";;
 esac
 
-step "next"
-printf '  %sst doctor%s          verify the install\n' "$B" "$R"
-printf '  %sst new <branch>%s    from inside any git repo\n' "$B" "$R"
-printf '  %sM-w%s picker   %sM-e%s claude↔vim   %sM-q%s close tree\n\n' "$B" "$R" "$B" "$R" "$B" "$R"
+rule
+step "04" "Ready" "supertree $VERSION is installed."
+printf '      %sst doctor%s          verify the install\n' "$B" "$R"
+printf '      %sst new <branch>%s    start from any git repo\n' "$B" "$R"
+if [ "$HARNESS" = openrouter ]; then
+  printf '      %sopencode%s           run /connect and select OpenRouter once\n' "$B" "$R"
+fi
+printf '\n      %sM-w%s picker   %sM-e%s toggle   %sM-q%s / %sM-Q%s leave tmux\n\n' "$B" "$R" "$B" "$R" "$B" "$R" "$B" "$R"
 rule
 printf '\n'

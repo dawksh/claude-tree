@@ -1,0 +1,129 @@
+# shellcheck shell=bash
+# supertree picker module
+
+picker_rows() {
+  local panes format name bin label path sess pane
+  format='#{session_name}'$'\t''#{window_name}'$'\t''#{pane_id}'$'\t''#{@st_agent_state}'$'\t''#{@st_agent_window}'$'\t''#{pane_current_command}'
+  panes=$(tmux list-panes -a -F "$format" 2>/dev/null) || panes=''
+  name=$(harness_window)
+  bin=$(harness_bin)
+  bin=${bin##*/}
+
+  list_trees | while IFS=$'\t' read -r repo branch path; do
+    printf '%s\t%s\t%s\t%s\n' "$repo" "$branch" "$path" \
+      "$(sess_name "$repo" "$(branch_key "$branch")")"
+  done | awk -F '\t' -v default_name="$name" -v bin="$bin" '
+    FILENAME == ARGV[1] {
+      s = $1
+      if (s == "") next
+      live[s] = 1
+      if ($5 != "") agent_window[s] = $5
+      wanted = agent_window[s] != "" ? agent_window[s] : default_name
+      if ($2 == wanted && !(s in agent_pane)) {
+        agent_pane[s] = $3
+        agent_state[s] = $4
+        agent_command[s] = $6
+      }
+      next
+    }
+    {
+      s = $4
+      repo_label = $1
+      sub(/-[^-]*$/, "", repo_label)
+      label = repo_label "/" $2
+      if (!(s in live)) { status = "closed" }
+      else {
+        status = "done"
+        if (s in agent_pane && (agent_state[s] == "running" ||
+            (agent_state[s] == "" && (agent_command[s] == bin ||
+             agent_command[s] == "node" || agent_command[s] == "bun"))))
+          status = "running"
+      }
+      printf "%-28s  %-7s\t%s\t%s\t%s\n", label, status, $3, s, agent_pane[s]
+    }
+  ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r label path sess pane; do
+    if [ -n "$pane" ] && [ "${label%running}" != "$label" ] && agent_needs_input "$pane"; then
+      label=${label%running}input
+    fi
+    printf '%s\t%s\t%s\n' "$label" "$path" "$sess"
+  done
+}
+
+# ---------------------------------------------------------------- commands
+
+cmd_go() {
+  local query="" popup=0 popup_client=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --picker) shift;;
+      --popup) [ $# -ge 2 ] || die "usage: st go --popup <tmux-client>"
+               popup=1; popup_client=$2; shift 2;;
+      *) query=$1; shift;;
+    esac
+  done
+
+  local rows sel dir sess key branch main choices
+  if [ "${ST_PICKER_ROWS+x}" = x ]; then rows=$ST_PICKER_ROWS
+  else rows=$(picker_rows | sort_recent); fi
+
+  [ -n "$rows" ] || die "no worktrees known yet — run 'st new <branch>' inside a repo"
+
+  if [ "$popup" = 1 ]; then
+    [ -n "$popup_client" ] || die "no tmux client for tree picker"
+    local self
+    self=$(st_executable)
+    tmux display-popup -c "$popup_client" -d "$PWD" -E -w 80% -h 70% \
+      -e "ST_PICKER_ROWS=$rows" "$self go --picker"
+    return
+  fi
+
+  if [ -n "$query" ]; then
+    sel=$(printf '%s\n' "$rows" | grep -i -- "$query" | head -1) || true
+    [ -n "$sel" ] || die "no tree matching: $query"
+  else
+    choices=$rows
+    if declare -F cmd_new >/dev/null; then
+      choices=$(printf '%s\n+ new branch…\t\t\n' "$rows")
+    fi
+    sel=$(printf '%s\n' "$choices" |
+      fzf --delimiter=$'\t' --with-nth=1 --height=100% --reverse \
+          --no-sort --sync \
+          --border --border-label=' Trees ' \
+          --prompt='Find tree › ' --preview-window=hidden \
+          --expect=ctrl-d --bind='esc:abort') || return 0
+    key=${sel%%$'\n'*}
+    sel=${sel#*$'\n'}
+    if [ "$key" = ctrl-d ]; then
+      declare -F cmd_rm >/dev/null || { info "remove module is unavailable"; return 0; }
+      case $sel in '+ new branch'*) return 0;; esac
+      dir=$(printf '%s' "$sel" | cut -f2)
+      branch=$(git -C "$dir" branch --show-current)
+      [ -n "$branch" ] || die "cannot delete a detached worktree from the picker"
+      main=$(main_worktree "$dir")
+      [ "$dir" != "$main" ] || die "cannot delete the main worktree"
+      cmd_rm "$branch" --repo "$main"
+      return
+    fi
+  fi
+
+  case $sel in
+    '+ new branch'*)
+      local b r
+      printf 'branch: ' >&2; read -r b
+      [ -n "$b" ] || return 0
+      r=$(sort -u "$ST_REPOS")
+      if [ "$(printf '%s\n' "$r" | wc -l)" -gt 1 ]; then
+        r=$(printf '%s\n' "$r" | fzf --prompt='repo> ' --height=100% --reverse) || return 0
+      fi
+      cmd_new "$b" --repo "$r"
+      return;;
+  esac
+
+  dir=$(printf '%s' "$sel" | cut -f2)
+  sess=$(printf '%s' "$sel" | cut -f3)
+  build_session "$sess" "$dir"
+  attach "$sess"
+}
+
+st_register_command 'go' cmd_go 'pick a tree and switch to it' 'go [query]'
+st_register_command 'resume' cmd_go 'reopen a tree and resume its agent' 'resume [query]'
