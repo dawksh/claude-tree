@@ -137,7 +137,7 @@ cmd_rm() {
   done
   [ -n "$branch" ] || die "usage: st rm <branch> [--force]"
 
-  local main repo slug dir sess dirty unpushed current old_sess
+  local main repo slug dir sess dirty unpushed current old_sess current_sess=''
   main=$(require_repo "${repo_arg:-.}")
   repo=$(repo_key "$main")
   slug=$(branch_key "$branch")
@@ -174,13 +174,18 @@ cmd_rm() {
   current=$(branch_worktree "$main" "$branch" || true)
   [ "$current" = "$dir" ] || die "worktree for $branch changed; refusing to remove $dir"
 
+  if [ -n "${TMUX:-}" ]; then
+    current_sess=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null || true)
+  fi
   evacuate_clients "$sess"
-  tmux kill-session -t "=$sess" 2>/dev/null || true
+  # Killing our own session kills this process, so close it only after cleanup.
+  if [ "$sess" != "$current_sess" ]; then tmux kill-session -t "=$sess" 2>/dev/null || true; fi
   if [ "$force" = 1 ]; then git -C "$main" worktree remove --force "$dir"
   else git -C "$main" worktree remove "$dir"; fi
   git -C "$main" branch -d "$branch" >/dev/null 2>&1 || info "branch $branch kept (not merged)"
   clear_tree_state "$repo" "$slug" "$sess"
   info "removed $(basename "$main")/$branch"
+  if [ "$sess" = "$current_sess" ]; then tmux kill-session -t "=$sess" 2>/dev/null || true; fi
 }
 
 clear_tree_state() {
@@ -272,7 +277,7 @@ cmd_remove_all() {
       unpushed=$(git -C "$dir" log --format=%s HEAD --not --remotes 2>/dev/null || true)
     fi
     if [ "$force" = 0 ] && [ -n "$dirty$unpushed" ]; then
-      die "refusing to remove $(basename "$main")/${branch:-(detached)} with uncommitted or unpushed work; pass --force"
+      die "refusing to remove $(basename "${mains[i]}")/${branches[i]:-(detached)} with uncommitted or unpushed work; pass --force"
     fi
   done
   printf 'proceed? [y/N] ' >&2; read -r ans
