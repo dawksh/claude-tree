@@ -50,7 +50,7 @@ git -C "$fixture" checkout -qb main
 git -C "$fixture" -c user.name=Test -c user.email=test@example.com \
   commit -q --allow-empty -m init
 printf '%s\n' "$fixture" > "$ST_STATE/repos"
-main_session=$("$ROOT/bin/st" _sessions | grep '/main-' | head -1)
+main_session=$("$ROOT/bin/st" _sessions | grep -x 'supertree/main' | head -1)
 [ -n "$main_session" ] || fail 'main session was not listed'
 export ST_TEST_SESSION="$main_session"
 

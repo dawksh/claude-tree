@@ -2,17 +2,15 @@
 # supertree picker module
 
 picker_rows() {
-  local panes format name bin label path sess pane
+  local trees panes format name bin width label status path sess pane
+  trees=$(list_trees)
   format='#{session_name}'$'\t''#{window_name}'$'\t''#{pane_id}'$'\t''#{@st_agent_state}'$'\t''#{@st_agent_window}'$'\t''#{pane_current_command}'
   panes=$(tmux list-panes -a -F "$format" 2>/dev/null) || panes=''
   name=$(harness_window)
   bin=$(harness_bin)
   bin=${bin##*/}
 
-  list_trees | while IFS=$'\t' read -r repo branch path; do
-    printf '%s\t%s\t%s\t%s\n' "$repo" "$branch" "$path" \
-      "$(sess_name "$repo" "$(branch_key "$branch")")"
-  done | awk -F '\t' -v default_name="$name" -v bin="$bin" '
+  printf '%s\n' "$trees" | awk -F '\t' -v default_name="$name" -v bin="$bin" '
     FILENAME == ARGV[1] {
       s = $1
       if (s == "") next
@@ -26,7 +24,7 @@ picker_rows() {
       }
       next
     }
-    {
+    $0 != "" {
       s = $4
       repo_label = $1
       sub(/-[^-]*$/, "", repo_label)
@@ -39,13 +37,15 @@ picker_rows() {
              agent_command[s] == "node" || agent_command[s] == "bun"))))
           status = "running"
       }
-      printf "%-28s  %-7s\t%s\t%s\t%s\n", label, status, $3, s, agent_pane[s]
+      n++; row[n] = label "\t" status "\t" $3 "\t" s "\t" agent_pane[s]
+      if (length(label) > width) width = length(label)
     }
-  ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r label path sess pane; do
-    if [ -n "$pane" ] && [ "${label%running}" != "$label" ] && agent_needs_input "$pane"; then
-      label=${label%running}input
+    END { for (i = 1; i <= n; i++) print width "\t" row[i] }
+  ' <(printf '%s\n' "$panes") - | while IFS=$'\t' read -r width label status path sess pane; do
+    if [ "$status" = running ] && [ -n "$pane" ] && agent_needs_input "$pane"; then
+      status=input
     fi
-    printf '%s\t%s\t%s\n' "$label" "$path" "$sess"
+    printf '%-*s  %s\t%s\t%s\n' "$width" "$label" "$status" "$path" "$sess"
   done
 }
 

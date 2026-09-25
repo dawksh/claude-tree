@@ -161,7 +161,7 @@ EOF
   rm -f -- "$fragment" "$config"
   [ ! -d "$confdir" ] || rmdir "$confdir" 2>/dev/null || true
   if command -v tmux >/dev/null 2>&1 && tmux list-sessions >/dev/null 2>&1; then
-    for key in M-w M-e M-1 M-2 M-3; do
+    for key in M-w M-e M-Tab M-1 M-2 M-3; do
       binding=$(tmux list-keys -T root "$key" 2>/dev/null || true)
       case $binding in *"$self"*) tmux unbind-key -n "$key" 2>/dev/null || true;; esac
     done
@@ -174,7 +174,7 @@ EOF
     if [ "$(tmux show-options -gv status-left 2>/dev/null || true)" = \
       ' #{?@supertree_label,#{@supertree_label},#S} ' ]; then
       tmux set-option -gu status-left 2>/dev/null || true
-      [ "$(tmux show-options -gv status-left-length 2>/dev/null || true)" != 40 ] ||
+      [ "$(tmux show-options -gv status-left-length 2>/dev/null || true)" != 60 ] ||
         tmux set-option -gu status-left-length 2>/dev/null || true
     fi
     [ ! -f "$tmux_conf" ] || tmux source-file "$tmux_conf" 2>/dev/null || true

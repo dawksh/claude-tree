@@ -19,7 +19,6 @@ cmd_new() {
   repo=$(repo_key "$main")
   slug=$(branch_key "$branch")
   dir=$(tree_dir "$repo" "$slug")
-  sess=$(sess_name "$repo" "$slug")
   [ "$bare" = 1 ] || prepare_repo_config "$main"
   register_repo "$main"
 
@@ -48,6 +47,8 @@ cmd_new() {
   idx=$(tree_index "$repo" "$slug" "$(basename "$main")")
   if [ "$bare" = 0 ]; then
     bootstrap "$main" "$dir" "$repo" "$branch" "$idx"
+    sess=$(tree_session "$repo" "$branch")
+    [ -n "$sess" ] || die "cannot find a session name for $branch"
     build_session "$sess" "$dir"
     attach "$sess"
   else
@@ -70,8 +71,7 @@ cmd_trust() {
 
 cmd_ls() {
   local repo branch path s live changes agent kind main
-  list_trees | while IFS=$'\t' read -r repo branch path; do
-    s=$(sess_name "$repo" "$(branch_key "$branch")")
+  list_trees | while IFS=$'\t' read -r repo branch path s; do
     if tmux has-session -t "=$s" 2>/dev/null; then live='open'; else live='closed'; fi
     if [ "$live" = open ]; then agent=$(agent_status "$s"); else agent='-'; fi
     if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then changes='modified'; else changes='clean'; fi
@@ -143,11 +143,12 @@ cmd_rm() {
   slug=$(branch_key "$branch")
   dir=$(branch_worktree "$main" "$branch" || true)
   [ -n "$dir" ] && managed_tree "$main" "$branch" "$dir" || die "no managed worktree for $branch"
-  sess=$(sess_name "$repo" "$slug")
+  sess=$(tree_session "$repo" "$branch")
   [ -d "$dir" ] || die "no worktree for $branch at $dir"
   [ "$dir" != "$main" ] || die "cannot remove the main worktree"
   old_sess=$(sess_name "$(basename "$main")" "$(slugify "$branch")")
-  if [ "$dir" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ] &&
+  if [ "$old_sess" != "$sess" ] &&
+     [ "$dir" -ef "$(tree_dir "$(basename "$main")" "$(slugify "$branch")")" ] &&
      tmux has-session -t "=$old_sess" 2>/dev/null; then
     die "an older session for $branch is still open; close it before removing the tree"
   fi
@@ -227,7 +228,7 @@ cmd_remove_all() {
       esac
       sess=''
       if [ -n "$branch" ] && grep -qxF "$dir" "$ST_REPOS" 2>/dev/null; then
-        sess=$(sess_name "$(repo_key "$dir")" "$(branch_key "$branch")")
+        sess=$(tree_session "$(repo_key "$dir")" "$branch")
       fi
       dirs+=("$dir"); mains+=("$main"); branches+=("$branch")
       sessions+=("$sess"); kinds+=(repo)
@@ -237,8 +238,7 @@ cmd_remove_all() {
           die "worktree changed while listing: $dir"
       fi
       repo=$(repo_key "$main")
-      slug=$(branch_key "${branch:-(detached)}")
-      sess=$(sess_name "$repo" "$slug")
+      sess=$(tree_session "$repo" "${branch:-(detached)}")
       dirs+=("$dir"); mains+=("$main"); branches+=("$branch")
       sessions+=("$sess"); kinds+=(worktree)
     fi
