@@ -194,7 +194,7 @@ ensure_main_fallbacks() {
 }
 
 cmd_down() {
-  local yes=0 target="" s live
+  local yes=0 target="" s live current='' close_current=0
   while [ $# -gt 0 ]; do
     case $1 in
       -y|--yes) yes=1; shift;;
@@ -217,8 +217,18 @@ EOF
       case ${ans:-n} in y|Y|yes) ;; *) die "aborted";; esac
     fi
     [ "$target" != --subtrees ] || ensure_main_fallbacks
-    printf '%s\n' "$live" | while read -r s; do evacuate_clients "$s"; tmux kill-session -t "=$s"; done
+    if [ -n "${TMUX:-}" ]; then
+      current=$(tmux display-message -p ${TMUX_PANE:+-t "$TMUX_PANE"} '#S' 2>/dev/null || true)
+    fi
+    # Killing our own session kills this process, so close it last.
+    while IFS= read -r s; do
+      evacuate_clients "$s"
+      if [ "$s" = "$current" ]; then close_current=1; else tmux kill-session -t "=$s"; fi
+    done <<EOF
+$live
+EOF
     info "closed selected tree sessions (worktrees kept)"
+    [ "$close_current" = 0 ] || tmux kill-session -t "=$current"
     return 0
   fi
 
